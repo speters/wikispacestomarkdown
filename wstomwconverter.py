@@ -159,11 +159,7 @@ class WikispacesToMediawikiConverter:
             
     def parse_bold(self):
         """change bold from ** to '''"""
-        def replace_bold(matchobj):
-            text = matchobj.group(0)
-            text = text.replace('**', "'''")
-            return text
-        self.content = re.sub(r'(?<![\n\*])\*{2,}', replace_bold, self.content)
+        self.content = re.sub(r'(?s)(?:(?<=[^\n\*])\*\*|(?<=\n)\*\*(?=[^ ]))(.*?)(?:(?<=[^\n\*])\*\*|(?<=\n)\*\*(?=[^ ]))', r"'''\1'''", self.content)
         
     def parse_underline(self):
         """change underline from __ to <u></u>"""
