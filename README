@@ -1,0 +1,51 @@
+#!/bin/bash2
+#
+# This is a README ;-) Have a look how things work and edit to your needs. Don't run as script.
+
+read -p "WikiSpaces space/wiki name: " WIKISPACE
+read -p "WikiSpaces username: " WIKISPACES_USERNAME
+read -p "WikiSpaces password: " WIKISPACES_PASSWORD
+read -p "GitHub username: " GITHUB_USERNAME
+read -p "GitHub project (existing, empty): " GITHUB_PROJECT
+
+while true; do
+    read -p "Did you create the first Wiki page on Github manually? [y/n] " yn
+    case $yn in
+        [Yy]* ) break;;
+        * ) echo "Please create Wiki on GitHub now or press STRG+C to abort.";;
+    esac
+done
+
+echo ./wsexport.py $WIKISPACES $WIKISPACES_USERNAME $WIKISPACES_PASSWORD
+exit
+mkdir ${GITHUB_PROJECT}.wiki
+cd ${GITHUB_PROJECT}.wiki
+git init
+git fast-import --date-format=rfc2822 <../${WIKISPACE}.wiki.gitfastimport
+git repack -a -d
+git checkout
+git tag -a 'WikiSpaces_Import' -m "Imported Wiki from Wikispaces"
+git remote add origin git@github.com:${GITHUB_USERNAME}/${GITHUB_PROJECT}.wiki.git
+git push --set-upstream origin master
+for FILE in *creole ; do \
+        NFILE=`echo $FILE | sed -e's#\.creole##'` ; \
+        ../wstomdconverter.py -F '../blob/master/%s' -I '../blob/master/%s?raw=true' "$FILE" ;\
+        mv "$NFILE.creole_markdown" "$NFILE.creole" ; \
+        git mv "$NFILE.creole" "$NFILE.md" ; \
+        git mv "space.menu.creole" "_Sidebar.md" ;\
+done
+git commit -a -m "Converted Wiki to Markdown"
+cd ..
+
+# bail out, takes too much time:
+exit
+
+mkdir ${GITHUB_PROJECT}
+cd ${GITHUB_PROJECT}/
+git init 
+git fast-import --date-format=rfc2822 <../${WIKISPACE}.files.gitfastimport
+git repack -a -d
+git checkout
+git remote add origin git@github.com:${GITHUB_USERNAME}/${GITHUB_PROJECT}.git
+git push --set-upstream origin master
+cd ..
