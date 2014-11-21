@@ -70,6 +70,23 @@ Wikispaces parses this as a bolded nothing with a star following it.
         self.converter.run_regexps()
         self.assertEqual(self.converter.content, self.target_wikitext)
 
+    def test_bold_line_start(self):
+        self.source_wikitext = \
+"""
+** Bulleted text has a space
+**No space is bold** text
+And extra ** are the just asterisks.
+"""
+        self.target_wikitext = \
+"""
+** Bulleted text has a space
+'''No space is bold''' text
+And extra ** are the just asterisks.
+"""
+        self.converter.content = self.source_wikitext
+        self.converter.run_regexps()
+        self.assertEqual(self.converter.content, self.target_wikitext)
+
     def test_italics_simple(self):
         self.source_wikitext = \
 """

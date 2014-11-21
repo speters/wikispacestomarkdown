@@ -159,8 +159,9 @@ class WikispacesToMediawikiConverter:
             
     def parse_bold(self):
         """change bold from ** to '''"""
-        self.content = re.sub(r'(?s)(?:(?<=[^\n\*])\*\*|(?<=\n)\*\*(?=[^ ]))(.*?)(?:(?<=[^\n\*])\*\*|(?<=\n)\*\*(?=[^ ]))', r"'''\1'''", self.content)
-        
+        self.content = re.sub(r'(?<!\n)\*\*\*\*', r"''''''", self.content)
+        self.content = re.sub(r'(?s)(?:(?<=[^\n\*])\*\*|(?<=\n)\*\*(?=[^ \*]))(.*?)(?:(?<=[^\n\*])\*\*|(?<=\n)\*\*(?=[^ \*]))', r"'''\1'''", self.content)
+
     def parse_underline(self):
         """change underline from __ to <u></u>"""
         self.content = re.sub(r'(?s)__(.*?)__', r'<u>\1</u>', self.content)
