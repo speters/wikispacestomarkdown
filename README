@@ -12,32 +12,32 @@ while true; do
     read -p "Did you create the first Wiki page on Github manually? [y/n] " yn
     case $yn in
         [Yy]* ) break;;
-        * ) echo "Please create Wiki on GitHub now or press STRG+C to abort.";;
+        * ) echo "Please create Wiki on GitHub now on https://github.com/${GITHUB_USERNAME}/${GITHUB_PROJECT}/wiki/_new or press STRG+C to abort.";;
     esac
 done
 
 echo ./wsexport.py $WIKISPACES $WIKISPACES_USERNAME $WIKISPACES_PASSWORD
-exit
-mkdir ${GITHUB_PROJECT}.wiki
+
+git clone git@github.com:${GITHUB_USERNAME}/${GITHUB_PROJECT}.wiki.git
 cd ${GITHUB_PROJECT}.wiki
-git init
+git rm -f --cached Home.md
 git fast-import --date-format=rfc2822 <../${WIKISPACE}.wiki.gitfastimport
 git repack -a -d
 git checkout
 git tag -a 'WikiSpaces_Import' -m "Imported Wiki from Wikispaces"
 git remote add origin git@github.com:${GITHUB_USERNAME}/${GITHUB_PROJECT}.wiki.git
+git pull
 git push --set-upstream origin master
 for FILE in *creole ; do \
         NFILE=`echo $FILE | sed -e's#\.creole##'` ; \
         ../wstomdconverter.py -F '../blob/master/%s' -I '../blob/master/%s?raw=true' "$FILE" ;\
         mv "$NFILE.creole_markdown" "$NFILE.creole" ; \
         git mv "$NFILE.creole" "$NFILE.md" ; \
-        git mv "space.menu.creole" "_Sidebar.md" ;\
 done
+git mv "space.menu.creole" "_Sidebar.md"
 git commit -a -m "Converted Wiki to Markdown"
 cd ..
 
-# bail out, takes too much time:
 exit
 
 mkdir ${GITHUB_PROJECT}
