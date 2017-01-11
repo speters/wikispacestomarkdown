@@ -1,6 +1,8 @@
 #!/usr/bin/python
+# coding: utf-8
 # vim: set fileencoding=utf-8 :
 
+#import pdb; pdb.set_trace()
 import logging
 from logging import getLogger
 from SOAPpy import WSDL
@@ -36,7 +38,7 @@ except IndexError:
 # specify parts of export script to be run - useful when debugging
 do_pages = True
 do_members = True
-do_messages =True
+do_messages = True
 do_files = True
 
 # save html rendered by WikiSpaces for the wiki pages?
@@ -71,12 +73,12 @@ if do_pages or do_members or do_messages:
     # delete first by overwriting empty file
     output = open(outputwikiname, 'wb')
     output.close()
-    
+
     output = open(outputwikiname, 'ab')
 
 try:
         session = siteApi.login(username, password)
-except (SOAPpy.Types.faultType, e):
+except SOAPpy.Types.faultType as e:
         logging.error('Invalid Login')
         logging.error(e)
 
@@ -98,7 +100,7 @@ if do_pages or do_messages:
                 for topic in topics:
                     # TODO: check why the following is needed. According to the docs, topic_id should contain the id of the first message
                     topic_firstmsgid = topic.id
-                        
+
                     topictext = ''
                     try:
                         messages = messageApi.listMessagesInTopic(session, topic.topic_id)
@@ -122,7 +124,7 @@ if do_pages or do_messages:
                             topictext += "==Re: %s==\n" % message.subject
                         else:
                             topictext = "=%s=\n" % topic.subject   # TODO: Heading needed?
-                            topictext += "Wiki-Page [[%s]] Discussion\n\n" % page.name 
+                            topictext += "Wiki-Page [[%s]] Discussion\n\n" % page.name
 
                         topictext += "* From: %s <userid-%d@%s.wikispaces>\n" %  (message.user_created_username, message.user_created, space.name)
                         topictext += "* Date: %s\n\n" % datetime.datetime.fromtimestamp(message.date_created + timeoffset).strftime('%a, %e %b %Y %H:%M:%S '+ourtz)
@@ -214,7 +216,7 @@ if do_pages or do_messages:
 
 if do_files:
     outputfile = open(outputfilename, 'wb')
-    
+
     # for files, and their versions, we need to scrape the info from web pages, as there is no dedicated API
     csvurl = "http://%s.wikispaces.com/space/content?utable=WikiTablePageList&ut_csv=1" % space.name
     url = urllib2.urlopen(csvurl)
@@ -233,33 +235,42 @@ if do_files:
             if fileinfo['Type'] == 'file':
                 # get history of file from webpage, as there's no SOAP API for file versions
                 # TODO: make this work when pagination of history (>20 versions?) comes into play
-                request = "http://%s.wikispaces.com/file/history/%s" % (space.name, fileinfo['Name'].encode('utf8'))
+                request = "http://%s.wikispaces.com/file/history/%s" % (space.name, urllib2.quote(fileinfo['Name'].encode('utf8')))
                 try:
                     html = urllib2.urlopen(request).read()
-                except (urllib2.HTTPError, e):
+                except urllib2.HTTPError as e:
                     logging.error('HTTPError = %s, request = %s' % (e.code, request))
-                except (urllib2.URLError, e):
+                except urllib2.URLError as e:
                     logging.error('URLError = %s, request = %s' % (e.reason, request))
-                except (httplib.HTTPException, e):
-                    logging.error('HTTPException')
+                except httplib.HTTPException as e:
+                    logging.error('HTTPException %s' % e)
 
                 historyrows = Selector(text=html).xpath('//div[@id="WikiTableFileHistoryList"]/table/tbody/tr')
                 fileurls = [['Name', 'fileurl']]
                 for historyrow in historyrows:
-                    fileurl = "http://%s.wikispaces.com%s" % (space.name, historyrow.xpath('.//td[2]/a/@href').extract()[0].replace('/file/detail/','/file/view/'))
+                    fileurl = "http://%s.wikispaces.com%s" % (space.name, historyrow.xpath('.//td[2]/a/@href').extract()[0].replace('/file/detail/','/file/view/').encode('utf8'))
                     fileuser = historyrow.xpath('.//td[5]/a[2]/text()').extract()[0].strip()
                     fileversion = fileurl.split('/').pop()
 
                     if not fileuser in memberdict:
                         try:
                             memberdict[fileuser] = userApi.getUser(session, fileuser.encode('utf8'))
-                        except (SAXParseException, e):
+                        except SAXParseException as e:
                             logging.error("Could not get %s" % (fileuser))
 
-                    response = urllib2.urlopen(fileurl)
-                    data = response.read()
-
-                    lastmodified = response.headers.get("Last-Modified")
+                    try:
+                        response = urllib2.urlopen(fileurl)
+                        data = response.read()
+                        lastmodified = response.headers.get("Last-Modified")
+                    except urllib2.HTTPError as e:
+                        logging.error('HTTPError = %s, request = %s' % (e.code, request))
+                        break
+                    except urllib2.URLError as e:
+                        logging.error('URLError = %s, request = %s' % (e.reason, request))
+                        break
+                    except httplib.HTTPException as e:
+                        logging.error('HTTPException %s' % e)
+                        break
 
                     fastimport = "commit refs/heads/master\n"
                     fastimport += "committer %s <user-%d@%s.wikispaces> %s\n" % (fileuser.encode('utf-8'), memberdict[fileuser]['id'], space.name, lastmodified)
