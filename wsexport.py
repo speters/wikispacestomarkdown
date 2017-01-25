@@ -160,9 +160,9 @@ class Space(WikiSpaces):
             WikiSpaces.db.query('''
                 CREATE TABLE members (
                     id INTEGER,
-                    spaceid INTEGER,
                     userId INTEGER,
                     username VARCHAR,
+                    spaceid INTEGER,
                     PRIMARY KEY(id));''')
             self.dbtable_members = WikiSpaces.db.load_table('members')
             self.dbtable_members.create_index(['id'])
@@ -190,7 +190,7 @@ class Space(WikiSpaces):
         self.lastupdate = now()
         self.spacestruct['cachetime'] = self.lastupdate
         self.spacestruct['cachetime_members'] = self.memberlist_time
-        self.dbtable_space.upsert(self.spacestruct, keys=['id']) #,ensure=True)
+        self.dbtable_space.umpsert(self.spacestruct, keys=['id']) #,ensure=True)
         logging_debug('Space.getlive()@'.format(self.spacename))
         return self.spacestruct
 
@@ -214,7 +214,7 @@ class Space(WikiSpaces):
             m = WikiSpaces.dict(m)
             m['spaceid'] = self.spacestruct['id']
             l.append(m)
-            self.dbtable_members.upsert(m, keys=['spaceid', 'username']) #, ensure=True)
+            self.dbtable_members.upsert(m, keys=['username', 'spaceid']) #, ensure=True) # SOAP API does not deliver userId for all users, so use username
         self.memberlist = l
         self.memberlist_time = now()
         self.dbtable_space.update(dict(id = self.spacestruct['id'], cachetime_members = self.memberlist_time), ['id'])
@@ -376,17 +376,7 @@ class Pages(WikiSpaces):
 class Messages(WikiSpaces):
     url = WikiSpaces.urlformat.format('message') + '?wsdl'
 
-    def __init__(self, space, session = None):
-        if type(space) == Space:
-            self.spaceid = space.spacestruct['id']
-            # self.spacename = space.spacestruct['name']
-        elif type(space) == int:
-            self.spaceid = space
-            # self.spacename = WikiSpaces.getspacename(self.spaceid)
-        else:
-            self.spacename = space
-            self.spaceid = WikiSpaces.getspaceid(self.spacename)
-
+    def __init__(self, session = None):
         self.messageApi = Client(Messages.url, doctor = WikiSpaces.doctor)
         self.session = session
 
@@ -477,6 +467,87 @@ class Messages(WikiSpaces):
             a.append(m)
         return a
 
+class Users(WikiSpaces):
+    url = WikiSpaces.urlformat.format('user') + '?wsdl'
+
+    def __init__(self, session = None):
+        self.userApi = Client(Users.url, doctor = WikiSpaces.doctor)
+        self.session = session
+
+        try:
+            self.dbtable_user = WikiSpaces.db.load_table('user')
+        except: #sqlalchemy.exc.NoSuchTableError as e:
+            WikiSpaces.db.query('''
+                CREATE TABLE user (
+                    id INTEGER,
+                    username VARCHAR,
+                    posts INTEGER,
+                    edits INTEGER,
+                    date_created INTEGER,
+                    date_updated INTEGER,
+                    user_created INTEGER,
+                    user_updated INTEGER,
+                    auth_source_id INTEGER,
+                    auth_external_id VARCHAR,
+                    cachetime INTEGER,
+                    PRIMARY KEY(id));''')
+            self.dbtable_user = WikiSpaces.db.load_table('user')
+            self.dbtable_user.create_index(['id'])
+            logging.info('Created database table user')
+        self.lastupdate = 0
+
+    def getUser(self, username):
+        user = self.dbtable_user.find_one(username = username)
+        if (not(self.session is None)) and ((user is None)):# or (now() - self.lastupdate) > WikiSpaces.cachetime):
+            return self.getUserlive(username)
+        else:
+            return dict(user)
+
+    def getUserlive(self, username):
+        user = self.userApi.service.getUser(self.session.session, username)
+        user = WikiSpaces.dict(user)
+        user['cachetime'] = now()
+        self.dbtable_user.upsert(user, keys=['id']) #,ensure=True)
+        logging_debug('Users.getUserlive(username="{}")'.format(username))
+        return user
+
+    def getUserById(self, userid):
+        userid = int(userid)
+        user = self.dbtable_user.find_one(id = userid)
+        if (not(self.session is None)) and ((user is None)):# or (now() - self.lastupdate) > WikiSpaces.cachetime):
+            return self.getUserByIdlive(userid)
+        else:
+            return dict(user)
+
+    def getUserByIdlive(self, userid):
+        userid = int(userid)
+        user = self.userApi.service.getUserById(self.session.session, userid)
+        user = WikiSpaces.dict(user)
+        user['cachetime'] = now()
+        self.dbtable_user.upsert(user, keys=['id']) #,ensure=True)
+        logging_debug('Users.getUserByIdlive(userid="{}")'.format(userid))
+        return user
+
+def do_alltext(spacename, s):
+    pages = Pages(spacename, s)
+    allpages = pages.getPageslive()
+
+    messages = Messages(s)
+    for page in allpages:
+        messages.getAllMessagesInPage(page['pageId'])
+        logging.info('messages.getAllMessagesInPage({})'.format(page['name']))
+
+def do_allusers(spacename, s):
+    space = Space(spacename, s)
+    users = Users(s)
+    l = space.listmembers()
+    for m in l:
+        users.getUser(m['username'])
+
+'''
+echo 'http://openv.wikispaces.com/wiki/changes?latest_date_team=0&latest_date_project=0&latest_date_file=0&latest_date_page=0&latest_date_msg=0&latest_date_comment=0&latest_date_user_add=0&latest_date_user_del=0&latest_date_tag_add=0&latest_date_tag_del=0&latest_date_wiki=0&o=0' | sed -e 's/=0&/='$(date +%s)'&/g'
+
+'''
 
 if __name__ == "__main__":
     import configparser, os
@@ -500,19 +571,14 @@ if __name__ == "__main__":
 
     username = config.get(section, 'username')
     password = config.get(section, 'password')
+    try:
+        spacename = config.get(section, 'space')
+    except configparser.NoOptionError:
+        spacename = 'openv'
 
     w = Site()
     s = w.login(username, password)
 
-    #space = Space('openv', s)
-    #spaceinfo = space.get():w
-    #print(space)
-    # print(space.listmembers())
+    do_allusers(spacename, s)
+    # do_alltext(spacename, s)
 
-    pages = Pages('openv', s)
-    allpages = pages.getPageslive()
-
-    messages = Messages('openv', s)
-    for page in allpages:
-        messages.getAllMessagesInPage(page['pageId'])
-        logging.info('messages.getAllMessagesInPage({})'.format(page['name']))
