@@ -1,48 +1,32 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 # coding: utf-8
 # vim: set fileencoding=utf-8 :
 
-#import pdb; pdb.set_trace()
 import logging
-from logging import getLogger
-from SOAPpy import WSDL
-import SOAPpy
+
+from suds.client import Client
+from suds.xsd.doctor import ImportDoctor, Import
+from suds.bindings.binding import Binding
+
 import datetime
-from os import urandom
+import dataset
 import sys
-import hashlib
-import urllib2
-import csv
-from scrapy.selector import Selector
-from xml.sax._exceptions import SAXParseException
-import getpass
+#import csv
+#from scrapy.selector import Selector
+
+_lastreply = ''
+def replyfilter(r):
+    lastreply = r
+    return r
+
+Binding.replyfilter = (lambda s,r: replyfilter(r))
+
 #from slugify import slugify
 def slugify(s):
     return s.replace('/','_').replace('\\', '_')
 
+logging_debug = logging.info
 
-try:
-    spacename = sys.argv[1]
-    username = sys.argv[2]
-except IndexError:
-     print("wsexport.py spacename username [password]\n")
-     print("Exports a WikiSpaces.com Wiki with files for import with git fast-import")
-     exit(1)
-
-try:
-    password = sys.argv[3]
-    sys.argv[3] = '***'
-except IndexError:
-     password = getpass.getpass(prompt="WikiSpace.com password: ")
-
-# specify parts of export script to be run - useful when debugging
-do_pages = True
-do_members = True
-do_messages = True
-do_files = True
-
-# save html rendered by WikiSpaces for the wiki pages?
-savehtml = False
 
 # wikispaces timestamp seems to be in PST (Pacific Standard Time / UTC - 8h), whileas we live in CET / UTC +1h
 # we could stay in this TZ, but then git logs also show this TZ, which is annoying
@@ -50,292 +34,485 @@ savehtml = False
 timeoffset = -9*3600
 ourtz = 'CET'
 
-url = 'http://www.wikispaces.com'
-siteApi = WSDL.Proxy(url + '/site/api?wsdl')
-spaceApi = WSDL.Proxy(url + '/space/api?wsdl')
-userApi = WSDL.Proxy(url + '/user/api?wsdl')
-pageApi = WSDL.Proxy(url + '/page/api?wsdl')
-messageApi = WSDL.Proxy(url + '/message/api?wsdl')
+def now():
+    return int(datetime.datetime.utcnow().timestamp())
 
-# create a - hopefully unique - string to be used as a separator/EOT mark
-eotsign = hashlib.sha224(urandom(64)).hexdigest()
+def res2dict(p):
+    return [dict(m) for m in p] if not p is None else None
 
-logging.basicConfig(format='%(asctime)s %(levelname)s: %(message)s' , level = logging.INFO)
+class WikiSpaces(object):
+    urlformat = 'http://www.wikispaces.com/{}/api'
+    imp = Import('http://schemas.xmlsoap.org/soap/encoding/')
+    (imp.filter.add(urlformat.format(i)) for i in ('site', 'space', 'user', 'page', 'message'))
+    doctor = ImportDoctor(imp)
+    cachetime = 3600
+    db = None
 
-memberdict = {}
-pages = {}
+    @staticmethod
+    def dbconnect(dbname):
+        WikiSpaces.db = dataset.connect(dbname)
+        logging_debug('Connected to database {}'.format(dbname))
 
-filetimestamp = '{:%Y%m%d%H%M}'.format(datetime.datetime.now())
-outputfilename = "%s.files.gitfastimport-%s" % (spacename, filetimestamp)
-outputwikiname = "%s.wiki.gitfastimport-%s" % (spacename, filetimestamp)
+    @staticmethod
+    def dict(struct):
+        try:
+            return dict((field, getattr(struct, field)) for field, _ in struct._fields_)
+        except AttributeError:
+            return dict((field, getattr(struct, field)) for field, _ in struct)
 
-if do_pages or do_members or do_messages:
-    # delete first by overwriting empty file
-    output = open(outputwikiname, 'wb')
-    output.close()
+    @staticmethod
+    def getspaceid(spacename):
+        spacestruct = WikiSpaces.db['space'].find_one(name = spacename)
+        return spacestruct['id']
 
-    output = open(outputwikiname, 'ab')
+    @staticmethod
+    def getspacename(spaceid):
+        spacestruct = WikiSpaces.db['space'].find_one(id = spaceid)
+        return int(spacestruct['name'])
 
-try:
-        session = siteApi.login(username, password)
-except SOAPpy.Types.faultType as e:
-        logging.error('Invalid Login')
-        logging.error(e)
+class Session(object):
+    def __init__(self, session):
+        self.session = session
+        self.sessiontime = datetime.datetime.utcnow()
 
-space = spaceApi.getSpace(session, spacename)
-# TODO: check if this is ok or if it's better to use space.user_updated
-adminuser = userApi.getUserById(session, space.user_created)
-memberdict[adminuser.username] = adminuser
-logging.info("Space: %s by user %s" % (space.name, adminuser.username))
+    def getAge(self):
+        return (datetime.datetime.utcnow() - self.sessiontime)
 
-if do_pages or do_messages:
-    pages = pageApi.listPages(session, space.id)
+    def __str__(self):
+        return '{}:{}'.format(self.session, self.sessiontime)
 
-    for page in pages:
-        if do_messages:
-            # list topics of a page
-            topics = messageApi.listTopics(session, page.id)
-            if topics != None:
-                logging.info("Got list of topics for page %s" % page.name)
-                for topic in topics:
-                    # TODO: check why the following is needed. According to the docs, topic_id should contain the id of the first message
-                    topic_firstmsgid = topic.id
+    def __repr__(self):
+        return self.session
 
-                    topictext = ''
-                    try:
-                        messages = messageApi.listMessagesInTopic(session, topic.topic_id)
-                    except SAXParseException:
-                        logging.error("Failed on topic id %d '%s'" % (topic.topic_id, topic.subject))
-                        messages = [topic]
+class Site(WikiSpaces):
+    url = WikiSpaces.urlformat.format('site') + '?wsdl'
 
-                    if topic.subject == '':
-                        topic.subject = page.name
+    def __init__(self, dbname = 'sqlite:///wikispaces.sqlite'):
+        self.siteApi = Client(Site.url)
+        if WikiSpaces.db is None:
+            WikiSpaces.dbconnect(dbname)
+        self.db = WikiSpaces.db
 
-                    # we choose flat names, as GH wiki doesn't support dirs/namespaces/slashes in page names
-                    topicwikiname = "%s-Topic-%s-%d" % (slugify(page.name), slugify(topic.subject), topic.topic_id)
-                    filename = topicwikiname + ".creole"
+    def login(self, username, password):
+        self.session = Session(self.siteApi.service.login(username, password))
+        logging_debug('Logged in as user {} with session '.format(username, self.session.session))
+        return self.session
 
-                    for message in messages:
-                        if message.subject == '':
-                            message.subject = topic.subject
+    def logout(self):
+        self.session = None
 
-                        if topictext != '':
-                            topictext += "\n\n----\n\n"
-                            topictext += "==Re: %s==\n" % message.subject
-                        else:
-                            topictext = "=%s=\n" % topic.subject   # TODO: Heading needed?
-                            topictext += "Wiki-Page [[%s]] Discussion\n\n" % page.name
+class Space(WikiSpaces):
+    url = WikiSpaces.urlformat.format('space') + '?wsdl'
 
-                        topictext += "* From: %s <userid-%d@%s.wikispaces>\n" %  (message.user_created_username, message.user_created, space.name)
-                        topictext += "* Date: %s\n\n" % datetime.datetime.fromtimestamp(message.date_created + timeoffset).strftime('%a, %e %b %Y %H:%M:%S '+ourtz)
-                        topictext += message.body
+    def __init__(self, spacename, session = None):
+        self.spaceApi = Client(Space.url, doctor = WikiSpaces.doctor)
+        self.session = session
+        self.spacename = spacename
 
-                        fastimport = "commit refs/heads/master\n"
-                        fastimport += "committer %s <user-%d@%s.wikispaces> %s\n" % (message.user_created_username, message.user_created, space.name, datetime.datetime.fromtimestamp(message.date_created + timeoffset).strftime('%a, %e %b %Y %H:%M:%S '+ourtz))
-                        fastimport += "data <<EOT%s\n" % eotsign
-                        fastimport += "Import of message in topic '%s' on page '%s'\n" % (topic.subject, page.name)
-                        fastimport += "EOT%s\n\n" % eotsign
+        try:
+            self.dbtable_space = WikiSpaces.db.load_table('space')
+        except: #sqlalchemy.exc.NoSuchTableError as e:
+            WikiSpaces.db.query('''
+                CREATE TABLE space (
+                    id INTEGER,
+                    name VARCHAR,
+                    text VARCHAR,
+                    description VARCHAR,
+                    status VARCHAR,
+                    image_type VARCHAR,
+                    background_color VARCHAR,
+                    highlight_color VARCHAR,
+                    text_color VARCHAR,
+                    link_color VARCHAR,
+                    subscription_type VARCHAR,
+                    subscription_level VARCHAR,
+                    subscription_end_date INTEGER,
+                    is_crawled BOOLEAN,
+                    license VARCHAR,
+                    discussions VARCHAR,
+                    date_created INTEGER,
+                    date_updated INTEGER,
+                    user_created INTEGER,
+                    user_updated INTEGER,
+                    page_count INTEGER,
+                    view_group VARCHAR,
+                    edit_group VARCHAR,
+                    create_group VARCHAR,
+                    message_edit_group VARCHAR,
+                    edits INTEGER,
+                    cachetime INTEGER,
+                    cachetime_members INTEGER,
+                    PRIMARY KEY(id));''')
+            self.dbtable_space = WikiSpaces.db.load_table('space')
+            self.dbtable_space.create_index(['id'])
+            logging.info('Created database table space')
 
-                        fastimport += "M 100644 inline %s\n" % filename
-                        fastimport += "data <<EOT%s\n" % eotsign
-                        fastimport += topictext
-                        fastimport += "\nEOT%s\n\n" % eotsign
-
-                        output.write(fastimport.encode('utf-8'))
-                    logging.info("Exported topic %s on page %s" % (topic.subject, page.name))
-
-        if do_pages:
-            versions = pageApi.listPageVersions(session, space.id, page.name)
-            for version in sorted(versions, key = lambda revision: revision.date_created):
-                pageversion = pageApi.getPageWithVersion(session, space.id, version.name, version.versionId)
-
-                # fix links in space.menu
-                if pageversion.name == 'space.menu':
-                    pageversion.content = pageversion.content.replace('[[%s/' % space.name, '[[')
-
-                fastimport = u"commit refs/heads/master\n"
-                fastimport += "committer %s <user-%d@%s.wikispaces> %s\n" % (pageversion.user_created_username, pageversion.user_created, space.name, datetime.datetime.fromtimestamp(pageversion.date_created + timeoffset).strftime('%a, %e %b %Y %H:%M:%S '+ourtz))
-                fastimport += "data <<EOT%s\n" % eotsign
-                fastimport += "VersionId %d\n" % version.versionId
-                fastimport += pageversion.comment + "\n"
-                fastimport += "EOT%s\n\n" % eotsign
-                try:
-                    fastimport += "M 100644 inline %s.creole\n" % slugify(pageversion.name)
-                except UnicodeDecodeError:
-                    logging.error("UnicodeDecodeError *grmpf*")
-                    print(pageversion)
-                    print(fastimport)
-                    fastimport += "M 100644 inline %s.creole\n" % slugify(page.name)
-                fastimport += "data <<EOT%s\n" % eotsign
-                # fastimport += "=%s=\n" % pageversion.name
-                fastimport += pageversion.content + "\n"
-
-                if topics != None:
-                    pagetopics = ''
-                    for topic in topics:
-                        if topic.date_created > page.date_created:
-                            # skip topic that doesn't exist yet for this page version
-                            next
-
-                        if topic.subject == '':
-                            topic.subject = page.name
-
-                        # we choose flat names, as GH wiki doesn't support dirs/namespaces/slashes in page names
-                        topicwikiname = "%s-Topic-%s-%d" % (slugify(page.name), slugify(topic.subject), topic.topic_id)
-                        filename = topicwikiname + ".creole"
-                        # build wiki list of topics for inclusion in wiki page
-                        pagetopics += "* [[%s|%s]]\n" % (topicwikiname, topic.subject)
-
-                    if pagetopics != '':
-                        fastimport += '\n\n----\n\n==Topics==\n\n'
-                        fastimport += pagetopics
-
-                fastimport += "EOT%s\n\n" % eotsign
-
-                if savehtml:
-                    # Now save also the rendered HTML...
-                    fastimport += u"commit refs/heads/master\n"
-                    fastimport += "committer %s <user-%d@%s.wikispaces> %s\n" % (pageversion.user_created_username, pageversion.user_created, space.name, datetime.datetime.fromtimestamp(pageversion.date_created + timeoffset).strftime('%a, %e %b %Y %H:%M:%S '+ourtz))
-                    fastimport += "data <<EOT%s\n" % eotsign
-                    fastimport += "VersionId %d\n" % version.versionId
-                    fastimport += pageversion.comment + "\n"
-                    fastimport += "EOT%s\n\n" % eotsign
-                    try:
-                        fastimport += "M 100644 inline %s.html\n" % slugify(pageversion.name)
-                    except UnicodeDecodeError:
-                        logging.error("UnicodeDecodeError *grmpf*")
-                        print(pageversion)
-                        print(fastimport)
-                        fastimport += "M 100644 inline %s.html\n" % slugify(page.name)
-                    fastimport += "data <<EOT%s\n" % eotsign
-                    fastimport += pageversion.html + "\n"
-                    fastimport += "EOT%s\n\n" % eotsign
-
-                logging.info("Page %s versionId %d" % (version.name, version.versionId))
-                output.write(fastimport.encode('utf-8'))
-
-if do_files:
-    outputfile = open(outputfilename, 'wb')
-
-    # for files, and their versions, we need to scrape the info from web pages, as there is no dedicated API
-    csvurl = "http://%s.wikispaces.com/space/content?utable=WikiTablePageList&ut_csv=1" % space.name
-    url = urllib2.urlopen(csvurl)
-    logging.info("Getting CSV info for files from %s" % csvurl)
-    reader = csv.reader(url)
-    i = 0
-    for row in reader:
-        row = [col.decode('utf8') for col in row]
-
-        if i == 0:
-            # first row
-            keys = row
+        s = self.dbtable_space.find_one(name=self.spacename)
+        if not s is None:
+            self.spacestruct = dict(s)
+            self.lastupdate = self.spacestruct['cachetime']
         else:
-            values = row
-            fileinfo = dict(zip(keys, values))
-            if fileinfo['Type'] == 'file':
-                # get history of file from webpage, as there's no SOAP API for file versions
-                # TODO: make this work when pagination of history (>20 versions?) comes into play
-                request = "http://%s.wikispaces.com/file/history/%s" % (space.name, urllib2.quote(fileinfo['Name'].encode('utf8')))
-                try:
-                    html = urllib2.urlopen(request).read()
-                except urllib2.HTTPError as e:
-                    logging.error('HTTPError = %s, request = %s' % (e.code, request))
-                except urllib2.URLError as e:
-                    logging.error('URLError = %s, request = %s' % (e.reason, request))
-                except httplib.HTTPException as e:
-                    logging.error('HTTPException %s' % e)
+            self.lastupdate = 0
 
-                historyrows = Selector(text=html).xpath('//div[@id="WikiTableFileHistoryList"]/table/tbody/tr')
-                fileurls = [['Name', 'fileurl']]
-                for historyrow in historyrows:
-                    fileurl = "http://%s.wikispaces.com%s" % (space.name, historyrow.xpath('.//td[2]/a/@href').extract()[0].replace('/file/detail/','/file/view/').encode('utf8'))
-                    fileuser = historyrow.xpath('.//td[5]/a[2]/text()').extract()[0].strip()
-                    fileversion = fileurl.split('/').pop()
+        try:
+            self.dbtable_members = WikiSpaces.db.load_table('members')
+        except: #sqlalchemy.exc.NoSuchTableError as e:
+            WikiSpaces.db.query('''
+                CREATE TABLE members (
+                    id INTEGER,
+                    spaceid INTEGER,
+                    userId INTEGER,
+                    username VARCHAR,
+                    PRIMARY KEY(id));''')
+            self.dbtable_members = WikiSpaces.db.load_table('members')
+            self.dbtable_members.create_index(['id'])
+            logging.info('Created database table members')
 
-                    if not fileuser in memberdict:
-                        try:
-                            memberdict[fileuser] = userApi.getUser(session, fileuser.encode('utf8'))
-                        except SAXParseException as e:
-                            logging.error("Could not get %s" % (fileuser))
-
-                    try:
-                        response = urllib2.urlopen(fileurl)
-                        data = response.read()
-                        lastmodified = response.headers.get("Last-Modified")
-                    except urllib2.HTTPError as e:
-                        logging.error('HTTPError = %s, request = %s' % (e.code, request))
-                        break
-                    except urllib2.URLError as e:
-                        logging.error('URLError = %s, request = %s' % (e.reason, request))
-                        break
-                    except httplib.HTTPException as e:
-                        logging.error('HTTPException %s' % e)
-                        break
-
-                    fastimport = "commit refs/heads/master\n"
-                    fastimport += "committer %s <user-%d@%s.wikispaces> %s\n" % (fileuser.encode('utf-8'), memberdict[fileuser]['id'], space.name, lastmodified)
-                    fastimport += "data <<EOT%s\n" % eotsign
-                    fastimport += "Import file from %s" % fileurl.encode('utf8') + "\n"
-                    fastimport += "EOT%s\n\n" % eotsign
-
-                    # TODO: use slugify(filename), but don't forget to change links in Wiki accordingly?
-                    fastimport += "M 100644 inline %s\n" % fileinfo['Name'].encode('utf8')
-                    fastimport += "data %s\n" % len(data)
-
-                    fastimport += data
-                    fastimport += "\n\n"
-
-                    logging.info("File %s by %s" % (fileurl, fileuser))
-                    outputfile.write(fastimport)
-        i+=1
-    outputfile.close()
-
-if do_members:
-    membertypes = {}
-    members = spaceApi.listMembers(session, space.id)
-    lastupdate = 0
-    numusers = 0
-    for member in members:
-        if not member.username in memberdict:
-            # get missing user infos (some might have been retrieved during previous operations)
-            memberdict[member.username] = userApi.getUser(session, member.username)
-            numusers += 1
-            logging.info("Get userinfo #%d for user %s" % (numusers, member.username))
-
-        if member.type == 'O':
-            member.type = 'Organizer'
-        elif member.type == 'M':
-            member.type = 'Member'
-        # can't change struct of SOAP object, so use another dict
-        membertypes[member.username] = member.type
-
-        if memberdict[member.username]['date_created'] > lastupdate:
-            lastupdate = memberdict[member.username]['date_created']
-        if memberdict[member.username]['date_updated'] > lastupdate:
-            lastupdate = memberdict[member.username]['date_updated']
-
-    # export as table in a wiki file
-    fastimport = "commit refs/heads/master\n"
-    fastimport += "committer %s <user-%d@%s.wikispaces> %s\n" % (adminuser.username, adminuser.id, space.name, datetime.datetime.fromtimestamp(lastupdate + timeoffset).strftime('%a, %e %b %Y %H:%M:%S '+ourtz))
-    fastimport += "data <<EOT%s\n" % eotsign
-    fastimport += "Import of Member-/Userlist\n"
-    fastimport += "EOT%s\n\n" % eotsign
-
-    fastimport += "M 100644 inline Memberlist.creole\n"
-    fastimport += "data <<EOT%s\n" % eotsign
-
-    # fastimport += "=%s Memberlist=\n" % space.name.encode('utf-8')
-    mkeys = memberdict.values()[0]._keys()
-    fastimport += "||" + "||".join(mkeys) + "||membertype||\n"
-
-    for member in sorted(memberdict.values(), key = lambda m: m.username.lower()):
-        fastimport += "||" + "||".join([str(member[val]) for val in mkeys]) + "||" + membertypes[member.username] + "||\n"
-
-    fastimport += "EOT%s\n\n" % eotsign
-
-    logging.info("Got memberlist")
-    output.write(fastimport.encode('utf-8'))
+        self.memberlist = []
+        self.memberlist_time = 0
 
 
-# finally:
-output.close()
+    def get(self):
+        if (not (self.session is None)) and ((now() - self.lastupdate) > WikiSpaces.cachetime):
+            return self.getlive()
+        else:
+            self.spacestruct = self.dbtable_space.find_one(name=self.spacename)
+            if self.spacestruct is None:
+                self.getlive()
+            else:
+                self.spacestruct = dict(self.spacestruct)
+                self.lastupdate = self.spacestruct['cachetime']
+            return self.spacestruct
+
+    def getlive(self):
+        space = self.spaceApi.service.getSpace(self.session.session, self.spacename)
+        self.spacestruct = WikiSpaces.dict(space)
+        self.lastupdate = now()
+        self.spacestruct['cachetime'] = self.lastupdate
+        self.spacestruct['cachetime_members'] = self.memberlist_time
+        self.dbtable_space.upsert(self.spacestruct, keys=['id']) #,ensure=True)
+        logging_debug('Space.getlive()@'.format(self.spacename))
+        return self.spacestruct
+
+    def listmembers(self):
+        if ((not (self.session is None)) and (len(self.memberlist) == 0) or ((now() - self.memberlist_time) > WikiSpaces.cachetime)):
+            return self.listmemberslive()
+        else:
+            s = self.dbtable_members.find(spaceid=self.spacestruct['id'])
+            if not s is None:
+                self.memberlist = [dict(m) for m in s]
+                self.memberlist_time = self.spacestruct['cachetime_members']
+            else:
+                self.memberlist = []
+                self.memberlist_time = 0
+            return self.memberlist
+
+    def listmemberslive(self):
+        members = self.spaceApi.service.listMembers(self.session.session, self.spacestruct['id'])
+        l = []
+        for m in members:
+            m = WikiSpaces.dict(m)
+            m['spaceid'] = self.spacestruct['id']
+            l.append(m)
+            self.dbtable_members.upsert(m, keys=['spaceid', 'username']) #, ensure=True)
+        self.memberlist = l
+        self.memberlist_time = now()
+        self.dbtable_space.update(dict(id = self.spacestruct['id'], cachetime_members = self.memberlist_time), ['id'])
+        self.spacestruct['cachetime_members'] = self.memberlist_time
+        logging_debug('Space.listmemberslive()@'.format(self.spacename))
+        return self.memberlist
+
+    def __str__(self):
+        return str(self.spacestruct)
+
+class Pages(WikiSpaces):
+    url = WikiSpaces.urlformat.format('page') + '?wsdl'
+
+    def __init__(self, space, session = None):
+        if type(space) == Space:
+            self.spaceid = space.spacestruct['id']
+            # self.spacename = space.spacestruct['name']
+        elif type(space) == int:
+            self.spaceid = space
+            # self.spacename = WikiSpaces.getspacename(self.spaceid)
+        else:
+            self.spacename = space
+            self.spaceid = WikiSpaces.getspaceid(self.spacename)
+
+        self.pageApi = Client(Pages.url, doctor = WikiSpaces.doctor)
+        self.session = session
+
+        try:
+            self.dbtable_page = WikiSpaces.db.load_table('page')
+        except: #sqlalchemy.exc.NoSuchTableError as e:
+            WikiSpaces.db.query('''
+                CREATE TABLE page (
+                    id INTEGER,
+                    pageId INTEGER,
+                    versionId INTEGER,
+                    name VARCHAR,
+                    spaceId INTEGER,
+                    latest_version INTEGER,
+                    versions INTEGER,
+                    is_read_only BOOLEAN,
+                    deletion INTEGER,
+                    view_group VARCHAR,
+                    edit_group VARCHAR,
+                    comment VARCHAR,
+                    content TEXT,
+                    html TEXT,
+                    date_created INTEGER,
+                    user_created INTEGER,
+                    user_created_username VARCHAR,
+                    cachetime INTEGER,
+                    PRIMARY KEY(id));''')
+            self.dbtable_page= WikiSpaces.db.load_table('page')
+            self.dbtable_page.create_index(['id'])
+            logging.info('Created database table page')
+        self.pagelist = []
+        self.lastupdate = 0
+
+    def listPages(self, spaceid = None):
+        if spaceid is None:
+            spaceid = self.spaceid
+
+        if (not(self.session is None)) and ((len(self.pagelist) == 0) or (now() - self.lastupdate) > WikiSpaces.cachetime):
+            return self.listPageslive(spaceid)
+        else:
+            return self.pagelist
+
+    def listPageslive(self, spaceid = None):
+        # gets a condensed list of pages (eg. no text content), so don't save into DB
+        if spaceid is None:
+            spaceid = self.spaceid
+
+        pages = self.pageApi.service.listPages(self.session.session, spaceid)
+        cachetime = now()
+        l = []
+        for page in pages:
+            page = WikiSpaces.dict(page)
+            page['pageId'] = page['id']
+            del(page['id'])
+            page['cachetime'] = cachetime
+            l.append(page)
+        self.pagelist = l
+        logging_debug('Pages.listPageslive()@{}'.format(spaceid))
+        return self.pagelist
+
+    def getPage(self, pagename, pageversion = None, pageid = None, spaceid = None):
+        if spaceid is None:
+            spaceid = self.spaceid
+        if pageversion is None:
+            if (not(pageid is None)) and (type(pageid) == int):
+                page = self.dbtable_page.find_one(pageId = pageid, spaceId = spaceid, order_by = '-date_created')
+            else:
+                page = self.dbtable_page.find_one(name = pagename, spaceId = spaceid, order_by = '-date_created')
+        else:
+            page = self.dbtable_page.find_one(spaceId=spaceid, versionId=pageversion)
+        if (not(self.session is None)) and ((page is None)): # or ((now() - page['cachetime']) > WikiSpaces.cachetime)):
+            return self.getPagelive(pagename, pageversion, spaceid)
+        else:
+            return dict(page)
+
+    def getPagelive(self, pagename, pageversion = None, spaceid = None):
+        if spaceid is None:
+            spaceid = self.spaceid
+
+        if pageversion is None:
+            page = self.pageApi.service.getPage(self.session.session, spaceid, pagename)
+        else:
+            page = self.pageApi.service.getPageWithVersion(self.session.session, spaceid, pagename, pageversion)
+
+        cachetime = now()
+        page = WikiSpaces.dict(page)
+        page['pageId'] = page['id']
+        del(page['id'])
+        page['cachetime'] = cachetime
+        logging_debug('Pages.getPagelive(pagename="{}", pageversion="{}")@{}'.format(pagename, str(pageversion), spaceid))
+        self.dbtable_page.upsert(page, keys=['pageId', 'versionId']) #,ensure=True)
+        return page
+
+    def listPageVersionslive(self, pagename, spaceid = None):
+        if spaceid is None:
+            spaceid = self.spaceid
+
+        pagelist = self.pageApi.service.listPageVersions(self.session.session, spaceid, pagename)
+        cachetime = now()
+        p = []
+        for page in pagelist:
+            page = WikiSpaces.dict(page)
+            page['pageId'] = page['id']
+            del(page['id'])
+            page['cachetime'] = cachetime
+            p.append(page)
+        logging_debug('Pages.listPageVersionslive(pagename="{}")@{}'.format(pagename, spaceid))
+        return p
+
+    def getPageVersionslive(self, pagename, spaceid = None):
+        if spaceid is None:
+            spaceid = self.spaceid
+
+        pagelist = self.listPageVersionslive(pagename, spaceid)
+        cachetime = now()
+
+        pageversions = []
+        for p in pagelist:
+            page = self.getPage(p['name'], p['versionId'], p['spaceId'])
+            pageversions.append(page)
+
+        return pageversions
+
+    def getPageslive(self, spaceid = None):
+        if spaceid is None:
+            spaceid = self.spaceid
+
+        pagelist = self.listPageslive(spaceid)
+        for page in pagelist:
+            self.getPageVersionslive(page['name'], spaceid)
+        return pagelist
+
+    # TODO: Check for deleted or renamed pages
+
+class Messages(WikiSpaces):
+    url = WikiSpaces.urlformat.format('message') + '?wsdl'
+
+    def __init__(self, space, session = None):
+        if type(space) == Space:
+            self.spaceid = space.spacestruct['id']
+            # self.spacename = space.spacestruct['name']
+        elif type(space) == int:
+            self.spaceid = space
+            # self.spacename = WikiSpaces.getspacename(self.spaceid)
+        else:
+            self.spacename = space
+            self.spaceid = WikiSpaces.getspaceid(self.spacename)
+
+        self.messageApi = Client(Messages.url, doctor = WikiSpaces.doctor)
+        self.session = session
+
+        try:
+            self.dbtable_message = WikiSpaces.db.load_table('message')
+        except: #sqlalchemy.exc.NoSuchTableError as e:
+            WikiSpaces.db.query('''
+                CREATE TABLE message (
+                    id INTEGER,
+                    subject VARCHAR,
+                    body TEXT,
+                    html TEXT,
+                    page_id INTEGER,
+                    topic_id INTEGER,
+                    responses INTEGER,
+                    latest_response_id INTEGER,
+                    date_response INTEGER,
+                    user_created INTEGER,
+                    user_created_username VARCHAR,
+                    date_created INTEGER,
+                    deletion INTEGER,
+                    cachetime INTEGER,
+                    PRIMARY KEY(id));''')
+            self.dbtable_message= WikiSpaces.db.load_table('message')
+            self.dbtable_message.create_index(['id'])
+            logging.info('Created database table message')
+        self.topiclist = {}
+        self.lastupdate = 0
+
+    def listTopics(self, pageid):
+        try:
+            topic = self.topiclist[pageid]
+        except KeyError:
+            topic = None
+        if (not(self.session is None)) and ((topic is None) or (now() - self.lastupdate) > WikiSpaces.cachetime):
+            return self.listTopicslive(pageid)
+        else:
+            return self.topiclist[pageid]
+
+    def listTopicslive(self, pageid):
+        topics = self.messageApi.service.listTopics(self.session.session, pageid)
+        cachetime = now()
+        l = []
+        for topic in topics:
+            topic = WikiSpaces.dict(topic)
+            topic['cachetime'] = cachetime
+            l.append(topic)
+            self.dbtable_message.upsert(topic, keys=['id']) #,ensure=True)
+        self.topiclist[pageid] = l
+        logging_debug('Messages.listTopicslive(pageid="{}")'.format(pageid))
+        return self.topiclist[pageid]
+
+    def listMessagesInTopic(self, topicid):
+        topic = self.dbtable_message.find(topic_id = topicid, order_by = '-cachetime')
+        topic = [dict(m) for m in topic] if not topic is None else None
+        latestreponse = None
+        if not (topic is None):
+            latestresponse = self.dbtable_message.find_one(id = topic[0]['latest_response_id'])
+        if (not(self.session is None)) and ((topic is None) or (latestresponse is None)):
+            return self.listMessagesInTopiclive(topicid)
+        else:
+            return topic
+
+    def listMessagesInTopiclive(self, topicid):
+        try:
+            messages = self.messageApi.service.listMessagesInTopic(self.session.session, topicid)
+        except: #xml.sax._exceptions.SAXParseException:
+            if len(_lastreply) == 0:
+                logging.error('Empty reply for Messages.listMessagesInTopiclive(topicid="{}")'.format(topicid))
+            else:
+                logging.error('Could not get topic in Messages.listMessagesInTopiclive(topicid="{}")'.format(topicid))
+            # with open('reply_topic{}'.format(topicid), 'w') as file:
+            #   file.write(_lastreply)
+            return None
+        cachetime = now()
+        for message in messages:
+            message = WikiSpaces.dict(message)
+            message['cachetime'] = cachetime
+            self.dbtable_message.upsert(message, keys=['id']) #,ensure=True)
+        logging_debug('Messages.listMessagesInTopiclive(topicid="{}")'.format(topicid))
+        return messages
+
+    def getAllMessagesInPage(self, pageid):
+        l = self.listTopics(pageid)
+        a = []
+        for t in l:
+            m = self.listMessagesInTopic(t['topic_id'])
+            a.append(m)
+        return a
+
+
+if __name__ == "__main__":
+    import configparser, os
+
+    logging.basicConfig(format='%(asctime)s: %(levelname)s: %(message)s', level=logging.INFO)
+
+    try:
+        config = configparser.ConfigParser.SafeConfigParser({'user':'', 'password':''})
+    except AttributeError:
+        config = configparser.ConfigParser()
+
+    config.read(['/etc/smtpclient.ini', os.path.expanduser('~/.smtpclient.ini')])
+
+    if config.has_section('wikispaces'):
+        section = 'wikispaces'
+    else:
+        try:
+            section=config.sections()[0]
+        except IndexError:
+            section = 'DEFAULT'
+
+    username = config.get(section, 'username')
+    password = config.get(section, 'password')
+
+    w = Site()
+    s = w.login(username, password)
+
+    #space = Space('openv', s)
+    #spaceinfo = space.get():w
+    #print(space)
+    # print(space.listmembers())
+
+    pages = Pages('openv', s)
+    allpages = pages.getPageslive()
+
+    messages = Messages('openv', s)
+    for page in allpages:
+        messages.getAllMessagesInPage(page['pageId'])
+        logging.info('messages.getAllMessagesInPage({})'.format(page['name']))
