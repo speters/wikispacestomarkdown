@@ -2,6 +2,8 @@
 # coding: utf-8
 # vim: set fileencoding=utf-8 :
 
+# see http://helpcenter.wikispaces.com/customer/portal/articles/1964502-api-customizations
+
 import logging
 
 from suds.client import Client
@@ -25,7 +27,7 @@ Binding.replyfilter = (lambda s,r: replyfilter(r))
 def slugify(s):
     return s.replace('/','_').replace('\\', '_')
 
-logging_debug = logging.info
+loginfo = logging.info
 
 
 # wikispaces timestamp seems to be in PST (Pacific Standard Time / UTC - 8h), whileas we live in CET / UTC +1h
@@ -51,7 +53,7 @@ class WikiSpaces(object):
     @staticmethod
     def dbconnect(dbname):
         WikiSpaces.db = dataset.connect(dbname)
-        logging_debug('Connected to database {}'.format(dbname))
+        loginfo('Connected to database {}'.format(dbname))
 
     @staticmethod
     def dict(struct):
@@ -95,7 +97,7 @@ class Site(WikiSpaces):
 
     def login(self, username, password):
         self.session = Session(self.siteApi.service.login(username, password))
-        logging_debug('Logged in as user {} with session '.format(username, self.session.session))
+        loginfo('Logged in as user {}'.format(username))
         return self.session
 
     def logout(self):
@@ -191,7 +193,7 @@ class Space(WikiSpaces):
         self.spacestruct['cachetime'] = self.lastupdate
         self.spacestruct['cachetime_members'] = self.memberlist_time
         self.dbtable_space.umpsert(self.spacestruct, keys=['id']) #,ensure=True)
-        logging_debug('Space.getlive()@'.format(self.spacename))
+        loginfo('Space.getlive()@'.format(self.spacename))
         return self.spacestruct
 
     def listmembers(self):
@@ -219,7 +221,7 @@ class Space(WikiSpaces):
         self.memberlist_time = now()
         self.dbtable_space.update(dict(id = self.spacestruct['id'], cachetime_members = self.memberlist_time), ['id'])
         self.spacestruct['cachetime_members'] = self.memberlist_time
-        logging_debug('Space.listmemberslive()@'.format(self.spacename))
+        loginfo('Space.listmemberslive()@'.format(self.spacename))
         return self.memberlist
 
     def __str__(self):
@@ -296,7 +298,7 @@ class Pages(WikiSpaces):
             page['cachetime'] = cachetime
             l.append(page)
         self.pagelist = l
-        logging_debug('Pages.listPageslive()@{}'.format(spaceid))
+        loginfo('Pages.listPageslive()@{}'.format(spaceid))
         return self.pagelist
 
     def getPage(self, pagename, pageversion = None, pageid = None, spaceid = None):
@@ -328,7 +330,7 @@ class Pages(WikiSpaces):
         page['pageId'] = page['id']
         del(page['id'])
         page['cachetime'] = cachetime
-        logging_debug('Pages.getPagelive(pagename="{}", pageversion="{}")@{}'.format(pagename, str(pageversion), spaceid))
+        loginfo('Pages.getPagelive(pagename="{}", pageversion="{}")@{}'.format(pagename, str(pageversion), spaceid))
         self.dbtable_page.upsert(page, keys=['pageId', 'versionId']) #,ensure=True)
         return page
 
@@ -345,7 +347,7 @@ class Pages(WikiSpaces):
             del(page['id'])
             page['cachetime'] = cachetime
             p.append(page)
-        logging_debug('Pages.listPageVersionslive(pagename="{}")@{}'.format(pagename, spaceid))
+        loginfo('Pages.listPageVersionslive(pagename="{}")@{}'.format(pagename, spaceid))
         return p
 
     def getPageVersionslive(self, pagename, spaceid = None):
@@ -426,7 +428,7 @@ class Messages(WikiSpaces):
             l.append(topic)
             self.dbtable_message.upsert(topic, keys=['id']) #,ensure=True)
         self.topiclist[pageid] = l
-        logging_debug('Messages.listTopicslive(pageid="{}")'.format(pageid))
+        loginfo('Messages.listTopicslive(pageid="{}")'.format(pageid))
         return self.topiclist[pageid]
 
     def listMessagesInTopic(self, topicid):
@@ -456,7 +458,7 @@ class Messages(WikiSpaces):
             message = WikiSpaces.dict(message)
             message['cachetime'] = cachetime
             self.dbtable_message.upsert(message, keys=['id']) #,ensure=True)
-        logging_debug('Messages.listMessagesInTopiclive(topicid="{}")'.format(topicid))
+        loginfo('Messages.listMessagesInTopiclive(topicid="{}")'.format(topicid))
         return messages
 
     def getAllMessagesInPage(self, pageid):
@@ -508,7 +510,7 @@ class Users(WikiSpaces):
         user = WikiSpaces.dict(user)
         user['cachetime'] = now()
         self.dbtable_user.upsert(user, keys=['id']) #,ensure=True)
-        logging_debug('Users.getUserlive(username="{}")'.format(username))
+        loginfo('Users.getUserlive(username="{}")'.format(username))
         return user
 
     def getUserById(self, userid):
@@ -525,7 +527,7 @@ class Users(WikiSpaces):
         user = WikiSpaces.dict(user)
         user['cachetime'] = now()
         self.dbtable_user.upsert(user, keys=['id']) #,ensure=True)
-        logging_debug('Users.getUserByIdlive(userid="{}")'.format(userid))
+        loginfo('Users.getUserByIdlive(userid="{}")'.format(userid))
         return user
 
 def do_alltext(spacename, s):
@@ -547,6 +549,10 @@ def do_allusers(spacename, s):
 '''
 echo 'http://openv.wikispaces.com/wiki/changes?latest_date_team=0&latest_date_project=0&latest_date_file=0&latest_date_page=0&latest_date_msg=0&latest_date_comment=0&latest_date_user_add=0&latest_date_user_del=0&latest_date_tag_add=0&latest_date_tag_del=0&latest_date_wiki=0&o=0' | sed -e 's/=0&/='$(date +%s)'&/g'
 
+
+http://openv.wikispaces.com/space/content?utable=WikiTablePageList&ut_csv=1
+
+http://openv.wikispaces.com/sitemap.xml
 '''
 
 if __name__ == "__main__":
