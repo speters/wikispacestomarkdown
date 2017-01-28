@@ -167,7 +167,7 @@ class Space(WikiSpaces):
                     spaceid INTEGER,
                     PRIMARY KEY(id));''')
             self.dbtable_members = WikiSpaces.db.load_table('members')
-            self.dbtable_members.create_index(['id'])
+            self.dbtable_members.create_index(['username', 'spaceid'])
             logging.info('Created database table members')
 
         self.memberlist = []
@@ -586,5 +586,5 @@ if __name__ == "__main__":
     s = w.login(username, password)
 
     do_allusers(spacename, s)
-    # do_alltext(spacename, s)
+    do_alltext(spacename, s)
 
