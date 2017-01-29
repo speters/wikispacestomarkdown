@@ -117,7 +117,7 @@ class Space(WikiSpaces):
             WikiSpaces.db.query('''
                 CREATE TABLE space (
                     id INTEGER,
-                    name VARCHAR,
+                    name VARCHAR NOT NULL,
                     text VARCHAR,
                     description VARCHAR,
                     status VARCHAR,
@@ -163,16 +163,17 @@ class Space(WikiSpaces):
                 CREATE TABLE members (
                     id INTEGER,
                     userId INTEGER,
-                    username VARCHAR,
-                    spaceid INTEGER,
+                    username VARCHAR NOT NULL,
+                    spaceid INTEGER NOT NULL,
+                    joined INTEGER DEFAULT 0,
+                    deleted INTEGER DEFAULT 0,
                     PRIMARY KEY(id));''')
             self.dbtable_members = WikiSpaces.db.load_table('members')
             self.dbtable_members.create_index(['username', 'spaceid'])
             logging.info('Created database table members')
 
-        self.memberlist = []
+        self.memberlist = {}
         self.memberlist_time = 0
-
 
     def get(self):
         if (not (self.session is None)) and ((now() - self.lastupdate) > WikiSpaces.cachetime):
@@ -192,7 +193,7 @@ class Space(WikiSpaces):
         self.lastupdate = now()
         self.spacestruct['cachetime'] = self.lastupdate
         self.spacestruct['cachetime_members'] = self.memberlist_time
-        self.dbtable_space.umpsert(self.spacestruct, keys=['id']) #,ensure=True)
+        self.dbtable_space.upsert(self.spacestruct, keys=['id']) #,ensure=True)
         loginfo('Space.getlive()@'.format(self.spacename))
         return self.spacestruct
 
@@ -202,21 +203,27 @@ class Space(WikiSpaces):
         else:
             s = self.dbtable_members.find(spaceid=self.spacestruct['id'])
             if not s is None:
-                self.memberlist = [dict(m) for m in s]
+                self.memberlist = dict((m['username'], dict(m)) for m in s)
                 self.memberlist_time = self.spacestruct['cachetime_members']
             else:
-                self.memberlist = []
+                self.memberlist = {}
                 self.memberlist_time = 0
             return self.memberlist
 
     def listmemberslive(self):
         members = self.spaceApi.service.listMembers(self.session.session, self.spacestruct['id'])
-        l = []
+        l = {}
+        if len(self.memberlist) == 0:
+            s = self.dbtable_members.find(spaceid=self.spacestruct['id'])
+            if not s is None:
+                self.memberlist = dict((m['username'], dict(m)) for m in s)
         for m in members:
             m = WikiSpaces.dict(m)
             m['spaceid'] = self.spacestruct['id']
-            l.append(m)
-            self.dbtable_members.upsert(m, keys=['username', 'spaceid']) #, ensure=True) # SOAP API does not deliver userId for all users, so use username
+            l[m['username']] = m
+            if not m['username'] in self.memberlist:
+                loginfo('New member {} @{}'.format(m['username'], m['spaceid']))
+                self.dbtable_members.insert(m) #, ensure=True) # SOAP API does not deliver userId for all users, so use username
         self.memberlist = l
         self.memberlist_time = now()
         self.dbtable_space.update(dict(id = self.spacestruct['id'], cachetime_members = self.memberlist_time), ['id'])
@@ -250,10 +257,10 @@ class Pages(WikiSpaces):
             WikiSpaces.db.query('''
                 CREATE TABLE page (
                     id INTEGER,
-                    pageId INTEGER,
-                    versionId INTEGER,
-                    name VARCHAR,
-                    spaceId INTEGER,
+                    pageId INTEGER NOT NULL,
+                    versionId INTEGER NOT NULL,
+                    name VARCHAR NOT NULL,
+                    spaceId INTEGER NOT NULL,
                     latest_version INTEGER,
                     versions INTEGER,
                     is_read_only BOOLEAN,
@@ -261,7 +268,7 @@ class Pages(WikiSpaces):
                     view_group VARCHAR,
                     edit_group VARCHAR,
                     comment VARCHAR,
-                    content TEXT,
+                    content TEXT NOT NULL,
                     html TEXT,
                     date_created INTEGER,
                     user_created INTEGER,
@@ -388,11 +395,11 @@ class Messages(WikiSpaces):
             WikiSpaces.db.query('''
                 CREATE TABLE message (
                     id INTEGER,
-                    subject VARCHAR,
-                    body TEXT,
+                    subject VARCHAR NOT NULL,
+                    body TEXT NOT NULL,
                     html TEXT,
-                    page_id INTEGER,
-                    topic_id INTEGER,
+                    page_id INTEGER NOT NULL,
+                    topic_id INTEGER NOT NULL,
                     responses INTEGER,
                     latest_response_id INTEGER,
                     date_response INTEGER,
@@ -482,7 +489,7 @@ class Users(WikiSpaces):
             WikiSpaces.db.query('''
                 CREATE TABLE user (
                     id INTEGER,
-                    username VARCHAR,
+                    username VARCHAR NOT NULL,
                     posts INTEGER,
                     edits INTEGER,
                     date_created INTEGER,
@@ -543,8 +550,8 @@ def do_allusers(spacename, s):
     space = Space(spacename, s)
     users = Users(s)
     l = space.listmembers()
-    for m in l:
-        users.getUser(m['username'])
+    for k,v in l.items():
+        users.getUser(k)
 
 '''
 echo 'http://openv.wikispaces.com/wiki/changes?latest_date_team=0&latest_date_project=0&latest_date_file=0&latest_date_page=0&latest_date_msg=0&latest_date_comment=0&latest_date_user_add=0&latest_date_user_del=0&latest_date_tag_add=0&latest_date_tag_del=0&latest_date_wiki=0&o=0' | sed -e 's/=0&/='$(date +%s)'&/g'
@@ -586,5 +593,5 @@ if __name__ == "__main__":
     s = w.login(username, password)
 
     do_allusers(spacename, s)
-    do_alltext(spacename, s)
+    #do_alltext(spacename, s)
 
