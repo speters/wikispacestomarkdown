@@ -165,6 +165,7 @@ class Space(WikiSpaces):
                     userId INTEGER,
                     username VARCHAR NOT NULL,
                     spaceid INTEGER NOT NULL,
+                    type VARCHAR,
                     joined INTEGER DEFAULT 0,
                     deleted INTEGER DEFAULT 0,
                     PRIMARY KEY(id));''')
@@ -217,15 +218,30 @@ class Space(WikiSpaces):
             s = self.dbtable_members.find(spaceid=self.spacestruct['id'])
             if not s is None:
                 self.memberlist = dict((m['username'], dict(m)) for m in s)
+        delmembers = self.memberlist
+        self.memberlist_time = now()
         for m in members:
             m = WikiSpaces.dict(m)
             m['spaceid'] = self.spacestruct['id']
-            l[m['username']] = m
+
             if not m['username'] in self.memberlist:
-                loginfo('New member {} @{}'.format(m['username'], m['spaceid']))
+                m['joined'] = self.memberlist_time
                 self.dbtable_members.insert(m) #, ensure=True) # SOAP API does not deliver userId for all users, so use username
+                loginfo('New member {} @{}'.format(m['username'], m['spaceid']))
+            else:
+                if self.memberlist[m['username']]['deleted'] != 0:
+                    m['deleted'] = 0
+                    self.dbtable_members.update(m, ['username'])
+                    loginfo('Re-joined member {} @{}'.format(m['username'], m['spaceid']))
+                del(delmembers[m['username']])
+            l[m['username']] = m
+
+        for d in delmembers:
+            d['deleted'] = self.memberlist_time
+            self.dbtable_members.update(d, ['username']) #, ensure=True) # SOAP API does not deliver userId for all users, so use username
+            loginfo('Deleted member {} @{}'.format(m['username'], m['spaceid']))
+
         self.memberlist = l
-        self.memberlist_time = now()
         self.dbtable_space.update(dict(id = self.spacestruct['id'], cachetime_members = self.memberlist_time), ['id'])
         self.spacestruct['cachetime_members'] = self.memberlist_time
         loginfo('Space.listmemberslive()@'.format(self.spacename))
@@ -254,6 +270,7 @@ class Pages(WikiSpaces):
         try:
             self.dbtable_page = WikiSpaces.db.load_table('page')
         except: #sqlalchemy.exc.NoSuchTableError as e:
+            # TODO: check if versionId could be used as PRIMARY KEY (versionId looks unique in _our_ data)
             WikiSpaces.db.query('''
                 CREATE TABLE page (
                     id INTEGER,
@@ -273,6 +290,7 @@ class Pages(WikiSpaces):
                     date_created INTEGER,
                     user_created INTEGER,
                     user_created_username VARCHAR,
+                    deleted INTEGER DEFAULT 0,
                     cachetime INTEGER,
                     PRIMARY KEY(id));''')
             self.dbtable_page= WikiSpaces.db.load_table('page')
@@ -338,7 +356,7 @@ class Pages(WikiSpaces):
         del(page['id'])
         page['cachetime'] = cachetime
         loginfo('Pages.getPagelive(pagename="{}", pageversion="{}")@{}'.format(pagename, str(pageversion), spaceid))
-        self.dbtable_page.upsert(page, keys=['pageId', 'versionId']) #,ensure=True)
+        self.dbtable_page.insert(page, keys=['pageId', 'versionId']) #,ensure=True)
         return page
 
     def listPageVersionslive(self, pagename, spaceid = None):
@@ -364,10 +382,23 @@ class Pages(WikiSpaces):
         pagelist = self.listPageVersionslive(pagename, spaceid)
         cachetime = now()
 
+        s = self.dbtable_page.find(name = pagename, spaceId = spaceid)
+        v = {}
+        if not s is None:
+            v = dict((m['versionId'], dict(m)) for m in s)
+
         pageversions = []
         for p in pagelist:
             page = self.getPage(p['name'], p['versionId'], p['spaceId'])
             pageversions.append(page)
+            try:
+                del(v[page['versionId']])
+            except KeyError:
+                pass
+
+        for versionid, page in v.items():
+            self.dbtable_page.update(dict(versionId = versionid, deleted = cachetime, spaceId = spaceid), ['pageId', 'versionId', 'spaceId'])
+            loginfo('Deleted Page {} (Version="{}")@{}'.format(page['name'], versionid, spaceid))
 
         return pageversions
 
@@ -375,12 +406,27 @@ class Pages(WikiSpaces):
         if spaceid is None:
             spaceid = self.spaceid
 
+        s = self.dbtable_page.distinct(pageId, spaceId = spaceid)
+        cachetime = now()
+        l = {}
+        if not s is None:
+            l = dict((p['pageId'], dict(p)) for p in s)
+
         pagelist = self.listPageslive(spaceid)
         for page in pagelist:
             self.getPageVersionslive(page['name'], spaceid)
+            try:
+                del(l[page['pageId']])
+            except KeyError:
+                pass
+
+        for pageid, p in l.items():
+            self.dbtable_page.update(dict(pageId = pageid, deleted = cachetime, spaceId = spaceid), ['pageId', 'spaceId'])
+            loginfo('Deleted Page {} @{}'.format(p['name'], spaceid))
+
         return pagelist
 
-    # TODO: Check for deleted or renamed pages
+    # TODO: Check for renamed pages
 
 class Messages(WikiSpaces):
     url = WikiSpaces.urlformat.format('message') + '?wsdl'
@@ -406,7 +452,7 @@ class Messages(WikiSpaces):
                     user_created INTEGER,
                     user_created_username VARCHAR,
                     date_created INTEGER,
-                    deletion INTEGER,
+                    deleted INTEGER DEFAULT 0,
                     cachetime INTEGER,
                     PRIMARY KEY(id));''')
             self.dbtable_message= WikiSpaces.db.load_table('message')
