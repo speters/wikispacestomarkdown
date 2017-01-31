@@ -13,7 +13,10 @@ from suds.bindings.binding import Binding
 import datetime
 import dataset
 import sys
-#import csv
+import time
+
+import csv
+import requests
 #from scrapy.selector import Selector
 
 _lastreply = ''
@@ -30,12 +33,6 @@ def slugify(s):
 loginfo = logging.info
 
 
-# wikispaces timestamp seems to be in PST (Pacific Standard Time / UTC - 8h), whileas we live in CET / UTC +1h
-# we could stay in this TZ, but then git logs also show this TZ, which is annoying
-# to adjust the timestamp to the actual displayed time of our TZ (CET), it's neccessary to substract 9h:
-timeoffset = -9*3600
-ourtz = 'CET'
-
 def now():
     return int(datetime.datetime.utcnow().timestamp())
 
@@ -48,13 +45,40 @@ class WikiSpaces(object):
     (imp.filter.add(urlformat.format(i)) for i in ('site', 'space', 'user', 'page', 'message'))
     doctor = ImportDoctor(imp)
     cachetime = 3600
+    # wikispaces "stamdard" timestamp seems to be in PST (Pacific Standard Time / UTC - 8h), whileas we live in CET / UTC +1h
+    # we could stay in this TZ, but then git logs also show this TZ, which is annoying
+    # to adjust the timestamp to the actual displayed time of our TZ (CET), it's neccessary to substract 9h:
+    timeoffset = -8*3600
     db = None
 
     @staticmethod
     def dbconnect(dbname):
         WikiSpaces.db = dataset.connect(dbname)
         loginfo('Connected to database {}'.format(dbname))
+    
+    # see https://github.com/migrateup/python-observer-pattern/blob/master/observer3.py
+    def init_events(self, events = None):
+        # maps event names to subscribers
+        # str -> dict
+        if events is None:
+            events = WikiSpaces.events
+        self.events = { event : dict() for event in events }
 
+    def get_subscribers(self, event):
+        return self.events[event]
+    
+    def register(self, event, who, callback=None):
+        if callback == None:
+            callback = getattr(who, 'update')
+        self.get_subscribers(event)[who] = callback
+    
+    def unregister(self, event, who):
+        del self.get_subscribers(event)[who]
+    
+    def dispatch(self, event, message):
+        for subscriber, callback in self.get_subscribers(event).items():
+            callback(message)
+    
     @staticmethod
     def dict(struct):
         try:
@@ -71,6 +95,14 @@ class WikiSpaces(object):
     def getspacename(spaceid):
         spacestruct = WikiSpaces.db['space'].find_one(id = spaceid)
         return int(spacestruct['name'])
+    
+    @staticmethod
+    def gettimestamp(s, f = "%Y-%m-%d %H:%M:%S", o = None):
+        if o is None:
+            o = WikiSpaces.timeoffset
+        else:
+            o = int(o)
+        return int(time.mktime(time.strptime(s, f)) + o) 
 
 class Session(object):
     def __init__(self, session):
@@ -94,15 +126,19 @@ class Site(WikiSpaces):
         if WikiSpaces.db is None:
             WikiSpaces.dbconnect(dbname)
         self.db = WikiSpaces.db
+        self.init_events(['create', 'delete'])
 
     def login(self, username, password):
         self.session = Session(self.siteApi.service.login(username, password))
         loginfo('Logged in as user {}'.format(username))
+        self.dispatch('create', ('session', self.session))
         return self.session
 
     def logout(self):
+        self.dispatch('delete', ('session', self.session))
         self.session = None
 
+#TODO: Split Space into Space, Member
 class Space(WikiSpaces):
     url = WikiSpaces.urlformat.format('space') + '?wsdl'
 
@@ -110,6 +146,8 @@ class Space(WikiSpaces):
         self.spaceApi = Client(Space.url, doctor = WikiSpaces.doctor)
         self.session = session
         self.spacename = spacename
+        self.init_events(['create', 'update', 'delete'])    # A bit misleading, because these are events regarding members
+        self.csvmemberlist = None
 
         try:
             self.dbtable_space = WikiSpaces.db.load_table('space')
@@ -211,6 +249,23 @@ class Space(WikiSpaces):
                 self.memberlist_time = 0
             return self.memberlist
 
+    def listmemberscsvlive(self):
+        r = requests.get('http://openv.wikispaces.com/wiki/members', params={'utable': 'WikiTableMemberList', 'ut_csv': 1})
+        self.csvmemberlist = {}
+        for row in csv.reader(r.text.split('\n'), delimiter=',', quotechar='"'):
+            if len(row) > 1:
+                if row[2] != 'Type':
+                    joined = WikiSpaces.gettimestamp(row[1])
+                    self.csvmemberlist[row[0]] = {'joined': joined, 'type': row[2]}
+    
+    def getmemberinfofromcsv(self, username):
+        if self.csvmemberlist is None:
+            self.listmemberscsvlive()
+        try:
+            return self.csvmemberlist[username]
+        except KeyError:
+            return None
+
     def listmemberslive(self):
         members = self.spaceApi.service.listMembers(self.session.session, self.spacestruct['id'])
         l = {}
@@ -225,13 +280,15 @@ class Space(WikiSpaces):
             m['spaceid'] = self.spacestruct['id']
 
             if not m['username'] in self.memberlist:
-                m['joined'] = self.memberlist_time
+                m['joined'] = self.getmemberinfofromcsv(m['username'])['joined']
                 self.dbtable_members.insert(m) #, ensure=True) # SOAP API does not deliver userId for all users, so use username
+                self.dispatch('create', ('member', m))
                 loginfo('New member {} @{}'.format(m['username'], m['spaceid']))
             else:
                 if self.memberlist[m['username']]['deleted'] != 0:
                     m['deleted'] = 0
                     self.dbtable_members.update(m, ['username'])
+                    self.dispatch('update', ('member', m))
                     loginfo('Re-joined member {} @{}'.format(m['username'], m['spaceid']))
                 del(delmembers[m['username']])
             l[m['username']] = m
@@ -239,6 +296,7 @@ class Space(WikiSpaces):
         for d in delmembers:
             d['deleted'] = self.memberlist_time
             self.dbtable_members.update(d, ['username']) #, ensure=True) # SOAP API does not deliver userId for all users, so use username
+            self.dispatch('delete', ('member', m))
             loginfo('Deleted member {} @{}'.format(m['username'], m['spaceid']))
 
         self.memberlist = l
@@ -266,6 +324,7 @@ class Pages(WikiSpaces):
 
         self.pageApi = Client(Pages.url, doctor = WikiSpaces.doctor)
         self.session = session
+        self.init_events(['create', 'update', 'delete'])
 
         try:
             self.dbtable_page = WikiSpaces.db.load_table('page')
@@ -356,7 +415,14 @@ class Pages(WikiSpaces):
         del(page['id'])
         page['cachetime'] = cachetime
         loginfo('Pages.getPagelive(pagename="{}", pageversion="{}")@{}'.format(pagename, str(pageversion), spaceid))
+        oldver = self.dbtable_page.find_one(pageId = page['pageId'], spaceId = spaceid)
         self.dbtable_page.insert(page, keys=['pageId', 'versionId']) #,ensure=True)
+
+        if oldver is None:
+            self.dispatch('create', ('page', page))
+        else:
+            self.dispatch('update', ('page', page))
+
         return page
 
     def listPageVersionslive(self, pagename, spaceid = None):
@@ -398,6 +464,7 @@ class Pages(WikiSpaces):
 
         for versionid, page in v.items():
             self.dbtable_page.update(dict(versionId = versionid, deleted = cachetime, spaceId = spaceid), ['pageId', 'versionId', 'spaceId'])
+            self.dispatch('delete', ('page', page))
             loginfo('Deleted Page {} (Version="{}")@{}'.format(page['name'], versionid, spaceid))
 
         return pageversions
@@ -406,7 +473,7 @@ class Pages(WikiSpaces):
         if spaceid is None:
             spaceid = self.spaceid
 
-        s = self.dbtable_page.distinct(pageId, spaceId = spaceid)
+        s = self.dbtable_page.distinct('pageId', spaceId = spaceid)
         cachetime = now()
         l = {}
         if not s is None:
@@ -422,6 +489,7 @@ class Pages(WikiSpaces):
 
         for pageid, p in l.items():
             self.dbtable_page.update(dict(pageId = pageid, deleted = cachetime, spaceId = spaceid), ['pageId', 'spaceId'])
+            self.dispatch('delete', ('page', page))
             loginfo('Deleted Page {} @{}'.format(p['name'], spaceid))
 
         return pagelist
@@ -434,6 +502,7 @@ class Messages(WikiSpaces):
     def __init__(self, session = None):
         self.messageApi = Client(Messages.url, doctor = WikiSpaces.doctor)
         self.session = session
+        self.init_events(['create', 'update', 'delete'])
 
         try:
             self.dbtable_message = WikiSpaces.db.load_table('message')
@@ -473,23 +542,35 @@ class Messages(WikiSpaces):
 
     def listTopicslive(self, pageid):
         topics = self.messageApi.service.listTopics(self.session.session, pageid)
+        oldtopics = self.dbtable_message.distinct('topic_id', page_id = pageid)
+        oldtopics = dict((m['topic_id'], dict(m)) for m in oldtopics)
         cachetime = now()
         l = []
         for topic in topics:
             topic = WikiSpaces.dict(topic)
             topic['cachetime'] = cachetime
             l.append(topic)
+            if not (topic['topic_id'] in oldtopics):
+                self.dispatch('create', ('topic', topic))
+            else:
+                del(oldtopics[topic['topic_id']])
             self.dbtable_message.upsert(topic, keys=['id']) #,ensure=True)
         self.topiclist[pageid] = l
+        
+        for t in oldtopics:
+            t['deleted'] = cachetime
+            self.dbtable_message.update(topic_id = t['topic_id'], deleted = t['deleted'], keys=['topic_id']) #,ensure=True)
+            self.dispatch('delete', ('topic', t))
+        
         loginfo('Messages.listTopicslive(pageid="{}")'.format(pageid))
         return self.topiclist[pageid]
 
     def listMessagesInTopic(self, topicid):
-        topic = self.dbtable_message.find(topic_id = topicid, order_by = '-cachetime')
-        topic = [dict(m) for m in topic] if not topic is None else None
+        topic = self.dbtable_message.find_one(topic_id = topicid, order_by = '-cachetime')
+        topic = dict(topic) if not topic is None else None
         latestreponse = None
         if not (topic is None):
-            latestresponse = self.dbtable_message.find_one(id = topic[0]['latest_response_id'])
+            latestresponse = self.dbtable_message.find_one(id = topic['latest_response_id'])
         if (not(self.session is None)) and ((topic is None) or (latestresponse is None)):
             return self.listMessagesInTopiclive(topicid)
         else:
@@ -506,11 +587,26 @@ class Messages(WikiSpaces):
             # with open('reply_topic{}'.format(topicid), 'w') as file:
             #   file.write(_lastreply)
             return None
+        oldmessages = self.dbtable_message.find(topic_id = topicid)
+        oldmessages = dict((m['id'], dict(m)) for m in oldmessages)
         cachetime = now()
         for message in messages:
             message = WikiSpaces.dict(message)
             message['cachetime'] = cachetime
-            self.dbtable_message.upsert(message, keys=['id']) #,ensure=True)
+            if not (message['id'] in oldmessages):
+                self.dbtable_message.insert(message) #,ensure=True)
+                self.dispatch('create', ('message', message))
+            else:
+                if (message['subject'] != oldmessages[message['id']]['subject']) or (message['body'] != oldmessages[message['id']]['body']):
+                    self.dispatch('update', ('message', message))
+                self.dbtable_message.update(message, keys=['id']) #,ensure=True)
+                del(oldmessages[message['id']])
+
+        for t in oldmessages:
+            t['deleted'] = cachetime
+            self.dbtable_message.update(topic_id = t['id'], deleted = t['deleted'], keys=['id']) #,ensure=True)
+            self.dispatch('delete', ('message', t))
+
         loginfo('Messages.listMessagesInTopiclive(topicid="{}")'.format(topicid))
         return messages
 
@@ -528,6 +624,7 @@ class Users(WikiSpaces):
     def __init__(self, session = None):
         self.userApi = Client(Users.url, doctor = WikiSpaces.doctor)
         self.session = session
+        self.init_events(['create', 'update'])
 
         try:
             self.dbtable_user = WikiSpaces.db.load_table('user')
@@ -562,7 +659,13 @@ class Users(WikiSpaces):
         user = self.userApi.service.getUser(self.session.session, username)
         user = WikiSpaces.dict(user)
         user['cachetime'] = now()
-        self.dbtable_user.upsert(user, keys=['id']) #,ensure=True)
+        olduser = self.dbtable_user.find_one(username = user['username'])
+        if olduser == None:
+            self.dbtable_user.insert(user) #,ensure=True)
+            self.dispatch('create', ('user', user))
+        else:
+            self.dbtable_user.update(user, keys=['id']) #,ensure=True)
+            # self.dispatch('update', ('user', user))
         loginfo('Users.getUserlive(username="{}")'.format(username))
         return user
 
@@ -579,7 +682,13 @@ class Users(WikiSpaces):
         user = self.userApi.service.getUserById(self.session.session, userid)
         user = WikiSpaces.dict(user)
         user['cachetime'] = now()
-        self.dbtable_user.upsert(user, keys=['id']) #,ensure=True)
+        olduser = self.dbtable_user.find_one(username = user['username'])
+        if olduser == None:
+            self.dbtable_user.insert(user) #,ensure=True)
+            self.dispatch('create', ('user', user))
+        else:
+            self.dbtable_user.update(user, keys=['id']) #,ensure=True)
+            # self.dispatch('update', ('user', user))
         loginfo('Users.getUserByIdlive(userid="{}")'.format(userid))
         return user
 
@@ -598,10 +707,33 @@ def do_allusers(spacename, s):
     l = space.listmembers()
     for k,v in l.items():
         users.getUser(k)
+        
 
+class Subscriber:
+    def __init__(self, name = None):
+        self.name = self.__class__.__name__ if name is None else name
+    def create(self, message):
+        logging.debug('{} got create message type "{}"'.format(self.name, message[0]))
+    def read(self, message):
+        logging.debug('{} got read message type "{}"'.format(self.name, message[0]))
+    def update(self, message):
+        logging.debug('{} got update message type "{}"'.format(self.name, message[0]))
+    def delete(self, message):
+        logging.debug('{} got delete message type "{}"'.format(self.name, message[0]))
+
+
+class GitFastEx(Subscriber):
+    def __init__(self):
+        pass
+
+    def update_message(self, message):
+        pass
+    
+    def create_member(self, message):
+        logging.debug('{} got update member event for "{}"'.format(self.name, message[0]))
+    
 '''
 echo 'http://openv.wikispaces.com/wiki/changes?latest_date_team=0&latest_date_project=0&latest_date_file=0&latest_date_page=0&latest_date_msg=0&latest_date_comment=0&latest_date_user_add=0&latest_date_user_del=0&latest_date_tag_add=0&latest_date_tag_del=0&latest_date_wiki=0&o=0' | sed -e 's/=0&/='$(date +%s)'&/g'
-
 
 http://openv.wikispaces.com/space/content?utable=WikiTablePageList&ut_csv=1
 
@@ -638,6 +770,15 @@ if __name__ == "__main__":
     w = Site()
     s = w.login(username, password)
 
-    do_allusers(spacename, s)
+    space = Space(spacename, s)
+    g = GitFastEx()
+    space.register('create', g, g.create_member)
+    users = Users(s)
+    l = space.listmembers()
+    for k,v in l.items():
+        users.getUser(k)
+   
+    #print(messages.listTopicslive(228816816))
+    # do_allusers(spacename, s)
     #do_alltext(spacename, s)
 
