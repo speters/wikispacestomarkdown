@@ -93,12 +93,17 @@ class WikispacesToMarkdownConverter:
         self.extended_start = False
         self.extended_end = False
         
-        # the 'rU' mode should convert any \r\n to plain \n.
-        self.content = open(filepath, 'rU').read()
+        try:
+            # the 'rU' mode should convert any \r\n to plain \n.
+            self.content = open(filepath, 'rU').read()
+        except (OSError, FileNotFoundError):
+            self.content = filepath.replace('\r\n', '\n')
+            self.filepath = None
         
     def run(self):
         self.run_regexps()
-        self.write_output()
+        return self.write_output()
+        
     
     def extend_edges(self):
         '''Make sure the content starts and ends with a newline.
@@ -219,7 +224,7 @@ class WikispacesToMarkdownConverter:
         """Parse variables.
         
         The only variable currently supported is {$page}"""
-        self.content = re.sub(r'{\$page}', os.path.basename(self.filepath), self.content)
+        self.content = re.sub(r'{\$page}', os.path.basename(self.filepath) if not self.filepath is None else '', self.content)
     
     def parse_includes(self):
         # TODO
@@ -382,10 +387,14 @@ class WikispacesToMarkdownConverter:
         self.content = re.sub(r'``(.*)``', r'`\1`', self.content)
     
     def write_output(self):
-        output_filepath = os.path.join(os.path.dirname(self.filepath), 
-                            os.path.basename(self.filepath) + '_markdown')
-                            
-        open(output_filepath, 'w').write(self.content)
+        if not self.filepath is None:
+
+            output_filepath = os.path.join(os.path.dirname(self.filepath), 
+                                os.path.basename(self.filepath) + '_markdown')
+                                
+            open(output_filepath, 'w').write(self.content)
+        else:
+            return self.content
 
 
 if __name__ == '__main__':
