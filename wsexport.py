@@ -12,12 +12,18 @@ from suds.bindings.binding import Binding
 
 import datetime
 import dataset
+from os import urandom
 import sys
+import hashlib
 import time
 
 import csv
 import requests
-#from scrapy.selector import Selector
+
+from wstomdconverter import WikispacesToMarkdownConverter
+from reportlab.platypus import tableofcontents
+from scrapy.selector import Selector
+from pyxb.bundles.wssplat.raw.wsa import From
 
 _lastreply = ''
 def replyfilter(r):
@@ -89,15 +95,15 @@ class WikiSpaces(object):
     @staticmethod
     def getspaceid(spacename):
         spacestruct = WikiSpaces.db['space'].find_one(name = spacename)
-        return spacestruct['id']
+        return int(spacestruct['id'])
 
     @staticmethod
     def getspacename(spaceid):
         spacestruct = WikiSpaces.db['space'].find_one(id = spaceid)
-        return int(spacestruct['name'])
+        return spacestruct['name']
     
     @staticmethod
-    def gettimestamp(s, f = "%Y-%m-%d %H:%M:%S", o = None):
+    def gettimestampfromwstime(s, f = "%Y-%m-%d %H:%M:%S", o = None):
         if o is None:
             o = WikiSpaces.timeoffset
         else:
@@ -250,12 +256,12 @@ class Space(WikiSpaces):
             return self.memberlist
 
     def listmemberscsvlive(self):
-        r = requests.get('http://openv.wikispaces.com/wiki/members', params={'utable': 'WikiTableMemberList', 'ut_csv': 1})
+        r = requests.get('https://openv.wikispaces.com/wiki/members', params={'utable': 'WikiTableMemberList', 'ut_csv': 1})
         self.csvmemberlist = {}
         for row in csv.reader(r.text.split('\n'), delimiter=',', quotechar='"'):
             if len(row) > 1:
                 if row[2] != 'Type':
-                    joined = WikiSpaces.gettimestamp(row[1])
+                    joined = WikiSpaces.gettimestampfromwstime(row[1])
                     self.csvmemberlist[row[0]] = {'joined': joined, 'type': row[2]}
     
     def getmemberinfofromcsv(self, username):
@@ -295,9 +301,9 @@ class Space(WikiSpaces):
 
         for d in delmembers:
             d['deleted'] = self.memberlist_time
-            self.dbtable_members.update(d, ['username']) #, ensure=True) # SOAP API does not deliver userId for all users, so use username
-            self.dispatch('delete', ('member', m))
-            loginfo('Deleted member {} @{}'.format(m['username'], m['spaceid']))
+            self.db.query('''UPDATE members SET deleted={:d} WHERE username='{}' AND deleted=0'''.format(d['deleted'], d['username'])) #, ensure=True) # SOAP API does not deliver userId for all users, so use username
+            self.dispatch('delete', ('member', d))
+            loginfo('Deleted member {} @{}'.format(d['username'], d['spaceid']))
 
         self.memberlist = l
         self.dbtable_space.update(dict(id = self.spacestruct['id'], cachetime_members = self.memberlist_time), ['id'])
@@ -340,10 +346,9 @@ class Pages(WikiSpaces):
                     latest_version INTEGER,
                     versions INTEGER,
                     is_read_only BOOLEAN,
-                    deletion INTEGER,
                     view_group VARCHAR,
                     edit_group VARCHAR,
-                    comment VARCHAR,
+                    comment VARCHAR DEFAULT '',
                     content TEXT NOT NULL,
                     html TEXT,
                     date_created INTEGER,
@@ -463,7 +468,8 @@ class Pages(WikiSpaces):
                 pass
 
         for versionid, page in v.items():
-            self.dbtable_page.update(dict(versionId = versionid, deleted = cachetime, spaceId = spaceid), ['pageId', 'versionId', 'spaceId'])
+            self.db.query('''UPDATE page SET deleted={:d} WHERE versionID={:d} AND pageId={:d} AND spaceId={:d} AND deleted=0'''
+                          .format(cachetime, versionid, p['pageId'], p['spaceId']))
             self.dispatch('delete', ('page', page))
             loginfo('Deleted Page {} (Version="{}")@{}'.format(page['name'], versionid, spaceid))
 
@@ -488,7 +494,8 @@ class Pages(WikiSpaces):
                 pass
 
         for pageid, p in l.items():
-            self.dbtable_page.update(dict(pageId = pageid, deleted = cachetime, spaceId = spaceid), ['pageId', 'spaceId'])
+            self.db.query('''UPDATE page SET deleted={:d} WHERE pageId={:d} AND spaceId={:d} AND deleted=0'''
+                          .format(cachetime, pageid, spaceid))
             self.dispatch('delete', ('page', page))
             loginfo('Deleted Page {} @{}'.format(p['name'], spaceid))
 
@@ -559,7 +566,8 @@ class Messages(WikiSpaces):
         
         for t in oldtopics:
             t['deleted'] = cachetime
-            self.dbtable_message.update(topic_id = t['topic_id'], deleted = t['deleted'], keys=['topic_id']) #,ensure=True)
+            self.db.query('''UPDATE message SET deleted={:d} WHERE topic_id={:d} AND deleted=0'''
+                          .format(cachetime, t['topic_id']))
             self.dispatch('delete', ('topic', t))
         
         loginfo('Messages.listTopicslive(pageid="{}")'.format(pageid))
@@ -604,7 +612,7 @@ class Messages(WikiSpaces):
 
         for t in oldmessages:
             t['deleted'] = cachetime
-            self.dbtable_message.update(topic_id = t['id'], deleted = t['deleted'], keys=['id']) #,ensure=True)
+            self.db.query('UPDATE message SET deleted={:d} WHERE id={:d} AND deleted=0'.format(cachetime, t['id']))
             self.dispatch('delete', ('message', t))
 
         loginfo('Messages.listMessagesInTopiclive(topicid="{}")'.format(topicid))
@@ -691,7 +699,150 @@ class Users(WikiSpaces):
             # self.dispatch('update', ('user', user))
         loginfo('Users.getUserByIdlive(userid="{}")'.format(userid))
         return user
+    
+class Files(WikiSpaces):
+    def __init__(self, space):
+        if type(space) == Space:
+            self.spaceid = space.spacestruct['id']
+            # self.spacename = space.spacestruct['name']
+        elif type(space) == int:
+            self.spaceid = space
+        else:
+            self.spaceid = WikiSpaces.getspaceid(space)
 
+        self.spacename = WikiSpaces.getspacename(self.spaceid)            
+        self.init_events(['create', 'update', 'delete'])
+
+        try:
+            self.dbtable_file = WikiSpaces.db.load_table('file')
+        except: #sqlalchemy.exc.NoSuchTableError as e:
+            WikiSpaces.db.query('''
+                CREATE TABLE file (
+                    id INTEGER NOT NULL,
+                    name VARCHAR NOT NULL,
+                    size INTEGER DEFAULT 0,
+                    type VARCHAR DEFAULT 'application/octet-stream',
+                    contents BLOB,
+                    spaceid INTEGER NOT NULL,
+                    username VARCHAR NOT NULL,
+                    date_created INTEGER DEFAULT 0,
+                    deleted INTEGER DEFAULT 0,
+                    cachetime INTEGER,
+                    PRIMARY KEY(id));''')
+            self.dbtable_file = WikiSpaces.db.load_table('file')
+            self.dbtable_file.create_index(['id'])
+            logging.info('Created database table file')
+            
+            self.filelist = {}
+    
+    def getFilelistlive(self):
+        # for files, and their versions, we need to scrape the info from web pages, as there is no dedicated API
+        r = requests.get("https://{}.wikispaces.com/space/content".format(self.spacename), params={'utable': 'WikiTablePageList', 'ut_csv': 1})
+        
+        oldfiles = self.dbtable_file.distinct('name', spaceid=self.spaceid)
+        oldfiles = dict((f['name'], dict(f)) for f in oldfiles)
+        cachetime = now()
+        
+        self.filelist = {}
+        for row in csv.reader(r.text.split('\n'), delimiter=',', quotechar='"'):
+                # Type,Name,Size,Status,Last Edited By,Date Last Edited (America/Los_Angeles)                                                                                                                             
+                # "file","04102012_vito.zip","12324","active","ceteris_paribus","2012-10-04 12:22:01"
+            if len(row) > 1:
+                if row[0] == 'file' :
+                    date_created = WikiSpaces.gettimestampfromwstime(row[5])
+                    self.filelist[row[1]] = {'name': row[1], 'size': row[2], 'username': row[5], 'date_created': date_created}
+                    
+                    if (row[1] in oldfiles):
+                        del(oldfiles[row[1]])
+
+        for f in oldfiles:
+            f['deleted'] = cachetime
+            self.db.query('''UPDATE file SET deleted={:d} WHERE name='{}' AND spaceid={:d} AND deleted=0'''.format(cachetime, f['name'], self.spaceid))
+            self.dispatch('delete', ('file', f))
+    
+        return self.filelist
+    
+    def getFileHistorylive(self, filename):
+        # get history of file from webpage, as there's no SOAP API for file versions
+        # TODO: make this work when pagination of history (>20 versions?) comes into play
+        r = requests.get("https://{}.wikispaces.com/file/history/{}".format(self.spacename, filename))
+
+        # Don't use below, as we do not want to get the content BLOBs here:
+        # oldfiles = self.dbtable_file.distinct('id', spaceid=self.spaceid, name=filename)
+        oldfiles = self.db.query('''SELECT id, name, size, type, username, spaceid, cachetime, deleted
+                            FROM file
+                            WHERE name='{}' AND spaceid={:d} '''.format(filename, self.spaceid))
+        oldfiles = dict((f['id'], dict(f)) for f in oldfiles)
+        numoldfiles = len(oldfiles)
+        historyrows = Selector(text = r.text).xpath('//div[@id="WikiTableFileHistoryList"]/table/tbody/tr')
+        
+        filehistory = {}
+        iserror = False
+        for historyrow in historyrows:
+            try:
+                fileurl = "http://{}.wikispaces.com{}".format(self.spacename, historyrow.xpath('.//td[2]/a/@href').extract()[0].replace('/file/detail/','/file/view/'))
+            except IndexError:
+                # WS does not deliver a 404 error in this case, just  <td colspan="5" class="noDataHolder">No page history.</td>
+                iserror = True
+                break
+            fileuser = historyrow.xpath('.//td[5]/a[2]/text()').extract()[0].strip()
+            fileversion = int(fileurl.split('/').pop())
+            
+            if (fileversion in oldfiles):
+                if int(oldfiles[fileversion]['deleted']) > 0:
+                    # un-deleted file:
+                    oldfiles[fileversion]['deleted'] = 0
+                    self.db.query('''UPDATE file SET deleted=0 WHERE id={:d} AND spaceid={:d} AND deleted>0'''
+                                  .format(fileversion, self.spaceid))
+                    self.dispatch('update', ('file', oldfiles[fileversion]))
+                    
+                filehistory[fileversion] = oldfiles[fileversion]
+                del(oldfiles[fileversion])
+            else:
+                # New version found
+                r = requests.get(fileurl)
+                if r.status_code == requests.codes.ok:
+                    lastmodified = WikiSpaces.gettimestampfromwstime(r.headers.get("Last-Modified"), f='%a, %d %b %Y %X %Z')
+                    newfile = {'id': fileversion,
+                               'name': filename,
+                               'size': r.headers.get('Content-Length'),
+                               'type': r.headers.get('Content-Type'),
+                               'username': fileuser,
+                               'spaceid': self.spaceid,
+                               'deleted': 0,
+                               'cachetime': now()}
+
+                    newfile['content'] = r.content
+                    self.dbtable_file.insert(newfile)
+                    
+                    # We do not want to hand over content due to possible large size
+                    del(newfile['content'])
+
+                    loginfo('Downloaded {} from {}'.format(filename, newfile))
+                    if numoldfiles == 0:
+                        self.dispatch('create', ('file', newfile))
+                    else:
+                        self.dispatch('update', ('file', newfile))
+
+                    numoldfiles += 1
+                    filehistory[fileversion] = newfile
+                    
+                else:
+                    logging.error('Could not download {} from {}'.format(filename, fileurl))
+
+        if (len(oldfiles)>0) and (not iserror):
+            for f in oldfiles:
+                f['deleted'] = now()
+                self.db.query('''UPDATE file SET deleted={:d} WHERE id={:d} AND spaceid={:d} AND deleted=0'''
+                          .format(f['deleted'], f['id'], self.spaceid))
+                self.dispatch('delete', ('file', f))
+
+        if (not filehistory == {}) and (not iserror):
+            return filehistory
+        else:
+            logging.error('Could not getFileHistorylive({})@{:d}'.format(filename, self.spaceid))
+            return None
+    
 def do_alltext(spacename, s):
     pages = Pages(spacename, s)
     allpages = pages.getPageslive()
@@ -723,15 +874,153 @@ class Subscriber:
 
 
 class GitFastEx(Subscriber):
-    def __init__(self):
-        pass
+    def __init__(self, outputdir = None):
+        self.db = WikiSpaces.db # TODO: Ceck if this is wise
+        # create a - hopefully unique - string to be used as a separator/EOT mark
+        self.eotsign = hashlib.sha224(urandom(64)).hexdigest()
+        self.now = datetime.datetime.utcnow()
+        self.outputdir = '.' if outputdir is None else outputdir
 
+    def outfile(self, prefix = None):
+        filetimestr = '{:%Y%m%d%H%M%S}'.format(self.now)
+        return "{}/{}wiki.gitfastimport-{}".format(self.outputdir, '' if prefix is None else ''.join(s for s in [prefix, '.']), filetimestr)
+
+    def page2gitfast(self, pageid, versionid = None, linktopics = True, converter = lambda x: x):
+        if versionid is None:
+            page = self.db['page'].find_one(pageId = pageid)
+        else:
+            page = self.db['page'].find_one(pageId = pageid, versionId = int(versionid))
+        if versionid is None:
+            versionsel = ''
+        else:
+            versionsel = ' AND page.versionId = {:d} '.format(versionid)
+        query = '''SELECT DISTINCT page.pageId, page.*, space.name AS spacename
+                        FROM page
+                        LEFT JOIN space ON page.spaceId = space.id
+                        WHERE page.pageId = {:d} AND page.deleted = 0 {}
+                        ORDER BY page.date_created DESC'''.format(pageid, versionsel)
+        print(query)
+        q = self.db.query(query)
+        
+        try:
+            page = dict([l for l in q][0])
+        except IndexError:
+            page = None 
+       
+        if not page is None:
+            if page['name'] == 'space.menu':
+                page['name'] = 'Sidebar'
+                # fix links in space.menu
+                page['content'] = page['content'].replace('[[{}/'.format(page['spacename'], '[['))
+            if page['name'] == 'home':
+                page['name'] = 'Home'
+
+            fastimport =  "commit refs/heads/master\n"
+            fastimport += "committer {} <userid-{:d}@{}.wikispaces> {:%a, %e %b %Y %H:%M:%S}Z\n".format(page['user_created_username'], page['user_created'], page['spacename'], datetime.datetime.fromtimestamp(page['date_created']))
+            fastimport += "data <<EOT{}\n".format(self.eotsign)
+            fastimport += "versionId {:d}\n".format(page['versionId'])
+            fastimport += page['comment'] if not page['comment'] is None else '' + "\n"
+            fastimport += "EOT{}\n\n".format(self.eotsign)
+            
+            fastimport += "M 100644 inline {}.md\n".format(slugify(page['name']))
+            fastimport += "data <<EOT{}\n".format(self.eotsign)
+            # fastimport += "={}=\n".format(page['name'])
+
+            fastimport += converter(page['content']) + "\n"
+
+            topics = self.db.query('''SELECT DISTINCT message.topic_id, message.*
+                        FROM message
+                        WHERE message.page_id = {:d}
+                            AND message.deleted = 0
+                            AND subject <> ''
+                            AND message.date_created <= {:d}
+                        ORDER BY message.date_created ASC
+                        '''.format(page['pageId'], page['date_created']))
+
+            pagetopics = ''
+            for topic in topics:
+                if topic['subject'] == '':
+                    topic['subject'] = topic['pagename']
+
+                # we choose flat names, as GH wiki doesn't support dirs/namespaces/slashes in page names
+                topicwikiname = "{}-Topic-{}-{:d}".format(slugify(page['name']), slugify(topic['subject']), topic['topic_id'])
+                # build wiki list of topics for inclusion in wiki page
+                pagetopics += "* [[{}|{}]]\n".format(topicwikiname, topic['subject'])
+
+            if pagetopics != '':
+                fastimport += '\n\n----\n\n==Topics==\n\n'
+                fastimport += pagetopics
+
+            fastimport += "EOT{}\n\n".format(self.eotsign)
+            
+            return fastimport
+        else:
+            return ''
+
+    def topic2gitfast(self, topicid, dateline = None, converter = lambda x: x):
+        if dateline is None:
+            datecut = ''
+        else:
+            datecut = ' AND message.date_created <= {:d} '.format(dateline)
+        messages = self.db.query('''SELECT DISTINCT message.id, message.*,page.name AS pagename, space.name AS spacename
+                        FROM message
+                        LEFT JOIN page ON message.page_id = page.pageId
+                        LEFT JOIN space ON page.spaceid = space.id
+                        WHERE message.topic_id = {:d} AND message.deleted = 0 {}
+                        ORDER BY message.date_created ASC'''.format(topicid, datecut))
+       
+        for message in messages:
+            if first:
+                first = False
+                # we choose flat names, as GH wiki doesn't support dirs/namespaces/slashes in page names
+                topicwikiname = "{}-Topic-{}-{:d}".format(slugify(message['pagename']), slugify(message['subject']), message['topic_id'])
+                filename = topicwikiname + ".md"
+                
+                if message['subject'] == '':
+                    message['subject'] = 'Topic {}'.format(message['pagename'])
+                    
+                topic_subject = message['subject']
+                
+                topictext = "={}=\n" .format(topic_subject)
+                topictext += "Wiki-Page [[{}]] Discussion\n\n".format(message['pagename'])
+            else:
+                if message['subject'] == '':
+                    message['subject'] = 'Re: {}'.format(topic_subject)
+                    
+                topictext += "\n\n----\n\n"
+                topictext += "==Re: {}==\n".format(message['subject'])
+
+            topictext += "* From: {} <userid-{:d}@{}.wikispaces>\n".format(message['user_created_username'], message['user_created'], message['spacename'])
+            topictext += "* Date: {:%a, %e %b %Y %H:%M:%S}Z\n".format(datetime.datetime.fromtimestamp(message['date_created']))
+            topictext += "* Message-ID: <{:d}-{:d}@{}.wikispaces>\n\n".format(message['topic_id'], message['id'], message['spacename'])
+            topictext += converter(message['body'])
+
+        if not first:
+            fastimport = "commit refs/heads/master\n"
+            fastimport += "committer {} <userid-{:d}@{}.wikispaces> {:%a, %e %b %Y %H:%M:%S}Z\n".format(message['user_created_username'], message['user_created'], message['spacename'], datetime.datetime.fromtimestamp(message['date_created']))
+            fastimport += "data <<EOT{}\n".format(self.eotsign)
+            fastimport += "Import of message in topic '{}' on page '{}'\n".format(topic_subject, message['pagename'])
+            fastimport += "EOT{}\n\n".format(self.eotsign)
+    
+            fastimport += "M 100644 inline {}\n".format(filename)
+            fastimport += "data <<EOT{}\n".format(self.eotsign)
+            fastimport += topictext
+            fastimport += "\nEOT{}\n\n".format(self.eotsign)
+    
+            return fastimport
+        else:
+            return ''
+        
     def update_message(self, message):
         pass
     
     def create_member(self, message):
         logging.debug('{} got update member event for "{}"'.format(self.name, message[0]))
-    
+
+
+def mdconvert(t):
+    wp = WikispacesToMarkdownConverter(t, {})
+    return wp.run()
 '''
 echo 'http://openv.wikispaces.com/wiki/changes?latest_date_team=0&latest_date_project=0&latest_date_file=0&latest_date_page=0&latest_date_msg=0&latest_date_comment=0&latest_date_user_add=0&latest_date_user_del=0&latest_date_tag_add=0&latest_date_tag_del=0&latest_date_wiki=0&o=0' | sed -e 's/=0&/='$(date +%s)'&/g'
 
@@ -769,9 +1058,21 @@ if __name__ == "__main__":
 
     w = Site()
     s = w.login(username, password)
-
+    
     space = Space(spacename, s)
+    
+    f = Files(spacename)
+    #print(f.getFileHistorylive('Platine_bestückt.jpg')) #CHECK: OK
+    print(f.getFileHistorylive('vcontrold.xml'))
+    '''
     g = GitFastEx()
+    
+    #print(g.outfile()) # checked OK
+    #print(g.topic2gitfast(18814747, lambda x: x.replace(' ', '_')))
+    print(g.page2gitfast(3087287, converter=lambda x: mdconvert(x)))
+    print (mdconvert('### blah #\n sadsad ADSD \n * asdsad'))
+    '''
+    '''
     space.register('create', g, g.create_member)
     users = Users(s)
     l = space.listmembers()
@@ -781,4 +1082,4 @@ if __name__ == "__main__":
     #print(messages.listTopicslive(228816816))
     # do_allusers(spacename, s)
     #do_alltext(spacename, s)
-
+'''
