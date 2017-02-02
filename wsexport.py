@@ -897,13 +897,9 @@ class GitFastEx(Subscriber):
 
     def outfile(self, prefix = None):
         filetimestr = '{:%Y%m%d%H%M%S}'.format(self.now)
-        return "{}/{}wiki.gitfastimport-{}".format(self.outputdir, '' if prefix is None else ''.join(s for s in [prefix, '.']), filetimestr)
+        return "{}/{}-{}.gitfastimport".format(self.outputdir, 'wiki' if prefix is None else ''.join(s for s in [prefix, '.']), filetimestr)
 
     def page2gitfast(self, pageid, versionid = None, linktopics = True, converter = lambda x: mdconvert(x)):
-        if versionid is None:
-            page = self.db['page'].find_one(pageId = pageid)
-        else:
-            page = self.db['page'].find_one(pageId = pageid, versionId = int(versionid))
         if versionid is None:
             versionsel = ''
         else:
@@ -913,7 +909,6 @@ class GitFastEx(Subscriber):
                         LEFT JOIN space ON page.spaceId = space.id
                         WHERE page.pageId = {:d} AND page.deleted = 0 {}
                         ORDER BY page.date_created DESC'''.format(pageid, versionsel)
-        print(query)
         q = self.db.query(query)
 
         try:
@@ -930,7 +925,7 @@ class GitFastEx(Subscriber):
                 page['name'] = 'Home'
 
             fastimport = "commit refs/heads/master\n"
-            fastimport += "committer {} <userid-{:d}@{}.wikispaces> {:%a, %e %b %Y %H:%M:%S}Z\n".format(page['user_created_username'], page['user_created'], page['spacename'], datetime.datetime.fromtimestamp(page['date_created']))
+            fastimport += "committer {} <userid-{:d}@{}.wikispaces> {:%a, %e %b %Y %H:%M:%S} GMT\n".format(page['user_created_username'], page['user_created'], page['spacename'], datetime.datetime.fromtimestamp(page['date_created']))
             fastimport += "data <<EOT{}\n".format(self.eotsign)
             fastimport += "versionId {:d}\n".format(page['versionId'])
             fastimport += page['comment'] if not page['comment'] is None else '' + "\n"
@@ -1005,13 +1000,13 @@ class GitFastEx(Subscriber):
                 topictext += "==Re: {}==\n".format(message['subject'])
 
             topictext += "* From: {} <userid-{:d}@{}.wikispaces>\n".format(message['user_created_username'], message['user_created'], message['spacename'])
-            topictext += "* Date: {:%a, %e %b %Y %H:%M:%S}Z\n".format(datetime.datetime.fromtimestamp(message['date_created']))
+            topictext += "* Date: {:%a, %e %b %Y %H:%M:%S} GMT\n".format(datetime.datetime.fromtimestamp(message['date_created']))
             topictext += "* Message-ID: <{:d}-{:d}@{}.wikispaces>\n\n".format(message['topic_id'], message['id'], message['spacename'])
             topictext += converter(message['body'])
 
         if not first:
             fastimport = "commit refs/heads/master\n"
-            fastimport += "committer {} <userid-{:d}@{}.wikispaces> {:%a, %e %b %Y %H:%M:%S}Z\n".format(message['user_created_username'], message['user_created'], message['spacename'], datetime.datetime.fromtimestamp(message['date_created']))
+            fastimport += "committer {} <userid-{:d}@{}.wikispaces> {:%a, %e %b %Y %H:%M:%S} GMT\n".format(message['user_created_username'], message['user_created'], message['spacename'], datetime.datetime.fromtimestamp(message['date_created']))
             fastimport += "data <<EOT{}\n".format(self.eotsign)
             fastimport += "Import of message in topic '{}' on page '{}'\n".format(topic_subject, message['pagename'])
             fastimport += "EOT{}\n\n".format(self.eotsign)
@@ -1041,8 +1036,7 @@ def mdconvert(t):
 '''
 echo 'http://openv.wikispaces.com/wiki/changes?latest_date_team=0&latest_date_project=0&latest_date_file=0&latest_date_page=0&latest_date_msg=0&latest_date_comment=0&latest_date_user_add=0&latest_date_user_del=0&latest_date_tag_add=0&latest_date_tag_del=0&latest_date_wiki=0&o=0' | sed -e 's/=0&/='$(date +%s)'&/g'
 
-http://openv.wikispaces.com/space/content?utable=WikiTablePageList&ut_csv=1
-
+pretty useless:
 http://openv.wikispaces.com/sitemap.xml
 '''
 
