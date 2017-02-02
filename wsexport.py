@@ -925,7 +925,7 @@ class GitFastEx(Subscriber):
                 page['name'] = 'Home'
 
             fastimport = "commit refs/heads/master\n"
-            fastimport += "committer {} <userid-{:d}@{}.wikispaces> {:%a, %e %b %Y %H:%M:%S} GMT\n".format(page['user_created_username'], page['user_created'], page['spacename'], datetime.datetime.fromtimestamp(page['date_created']))
+            fastimport += "committer {} <userid-{:d}@{}.wikispaces> {:%a, %e %b %Y %H:%M:%S} UT\n".format(page['user_created_username'], page['user_created'], page['spacename'], datetime.datetime.fromtimestamp(page['date_created']))
             fastimport += "data <<EOT{}\n".format(self.eotsign)
             fastimport += "versionId {:d}\n".format(page['versionId'])
             fastimport += page['comment'] if not page['comment'] is None else '' + "\n"
@@ -1000,13 +1000,13 @@ class GitFastEx(Subscriber):
                 topictext += "==Re: {}==\n".format(message['subject'])
 
             topictext += "* From: {} <userid-{:d}@{}.wikispaces>\n".format(message['user_created_username'], message['user_created'], message['spacename'])
-            topictext += "* Date: {:%a, %e %b %Y %H:%M:%S} GMT\n".format(datetime.datetime.fromtimestamp(message['date_created']))
+            topictext += "* Date: {:%a, %e %b %Y %H:%M:%S} UT\n".format(datetime.datetime.fromtimestamp(message['date_created']))
             topictext += "* Message-ID: <{:d}-{:d}@{}.wikispaces>\n\n".format(message['topic_id'], message['id'], message['spacename'])
             topictext += converter(message['body'])
 
         if not first:
             fastimport = "commit refs/heads/master\n"
-            fastimport += "committer {} <userid-{:d}@{}.wikispaces> {:%a, %e %b %Y %H:%M:%S} GMT\n".format(message['user_created_username'], message['user_created'], message['spacename'], datetime.datetime.fromtimestamp(message['date_created']))
+            fastimport += "committer {} <userid-{:d}@{}.wikispaces> {:%a, %e %b %Y %H:%M:%S} UT\n".format(message['user_created_username'], message['user_created'], message['spacename'], datetime.datetime.fromtimestamp(message['date_created']))
             fastimport += "data <<EOT{}\n".format(self.eotsign)
             fastimport += "Import of message in topic '{}' on page '{}'\n".format(topic_subject, message['pagename'])
             fastimport += "EOT{}\n\n".format(self.eotsign)
