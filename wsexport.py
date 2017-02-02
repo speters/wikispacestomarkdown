@@ -25,16 +25,18 @@ from reportlab.platypus import tableofcontents
 from scrapy.selector import Selector
 from pyxb.bundles.wssplat.raw.wsa import From
 
+logging.getLogger("requests").setLevel(logging.WARNING)
+
 _lastreply = ''
 def replyfilter(r):
     lastreply = r
     return r
 
-Binding.replyfilter = (lambda s,r: replyfilter(r))
+Binding.replyfilter = (lambda s, r: replyfilter(r))
 
-#from slugify import slugify
+# from slugify import slugify
 def slugify(s):
-    return s.replace('/','_').replace('\\', '_')
+    return s.replace('/', '_').replace('\\', '_')
 
 loginfo = logging.info
 
@@ -54,14 +56,14 @@ class WikiSpaces(object):
     # wikispaces "stamdard" timestamp seems to be in PST (Pacific Standard Time / UTC - 8h), whileas we live in CET / UTC +1h
     # we could stay in this TZ, but then git logs also show this TZ, which is annoying
     # to adjust the timestamp to the actual displayed time of our TZ (CET), it's neccessary to substract 9h:
-    timeoffset = -8*3600
+    timeoffset = -8 * 3600
     db = None
 
     @staticmethod
     def dbconnect(dbname):
         WikiSpaces.db = dataset.connect(dbname)
         loginfo('Connected to database {}'.format(dbname))
-    
+
     # see https://github.com/migrateup/python-observer-pattern/blob/master/observer3.py
     def init_events(self, events = None):
         # maps event names to subscribers
@@ -72,19 +74,19 @@ class WikiSpaces(object):
 
     def get_subscribers(self, event):
         return self.events[event]
-    
-    def register(self, event, who, callback=None):
+
+    def register(self, event, who, callback = None):
         if callback == None:
             callback = getattr(who, 'update')
         self.get_subscribers(event)[who] = callback
-    
+
     def unregister(self, event, who):
         del self.get_subscribers(event)[who]
-    
+
     def dispatch(self, event, message):
         for subscriber, callback in self.get_subscribers(event).items():
             callback(message)
-    
+
     @staticmethod
     def dict(struct):
         try:
@@ -101,14 +103,14 @@ class WikiSpaces(object):
     def getspacename(spaceid):
         spacestruct = WikiSpaces.db['space'].find_one(id = spaceid)
         return spacestruct['name']
-    
+
     @staticmethod
     def gettimestampfromwstime(s, f = "%Y-%m-%d %H:%M:%S", o = None):
         if o is None:
             o = WikiSpaces.timeoffset
         else:
             o = int(o)
-        return int(time.mktime(time.strptime(s, f)) + o) 
+        return int(time.mktime(time.strptime(s, f)) + o)
 
 class Session(object):
     def __init__(self, session):
@@ -144,7 +146,7 @@ class Site(WikiSpaces):
         self.dispatch('delete', ('session', self.session))
         self.session = None
 
-#TODO: Split Space into Space, Member
+# TODO: Split Space into Space, Member
 class Space(WikiSpaces):
     url = WikiSpaces.urlformat.format('space') + '?wsdl'
 
@@ -152,12 +154,12 @@ class Space(WikiSpaces):
         self.spaceApi = Client(Space.url, doctor = WikiSpaces.doctor)
         self.session = session
         self.spacename = spacename
-        self.init_events(['create', 'update', 'delete'])    # A bit misleading, because these are events regarding members
+        self.init_events(['create', 'update', 'delete'])  # A bit misleading, because these are events regarding members
         self.csvmemberlist = None
 
         try:
             self.dbtable_space = WikiSpaces.db.load_table('space')
-        except: #sqlalchemy.exc.NoSuchTableError as e:
+        except:  # sqlalchemy.exc.NoSuchTableError as e:
             WikiSpaces.db.query('''
                 CREATE TABLE space (
                     id INTEGER,
@@ -193,7 +195,7 @@ class Space(WikiSpaces):
             self.dbtable_space.create_index(['id'])
             logging.info('Created database table space')
 
-        s = self.dbtable_space.find_one(name=self.spacename)
+        s = self.dbtable_space.find_one(name = self.spacename)
         if not s is None:
             self.spacestruct = dict(s)
             self.lastupdate = self.spacestruct['cachetime']
@@ -202,7 +204,7 @@ class Space(WikiSpaces):
 
         try:
             self.dbtable_members = WikiSpaces.db.load_table('members')
-        except: #sqlalchemy.exc.NoSuchTableError as e:
+        except:  # sqlalchemy.exc.NoSuchTableError as e:
             WikiSpaces.db.query('''
                 CREATE TABLE members (
                     id INTEGER,
@@ -224,7 +226,7 @@ class Space(WikiSpaces):
         if (not (self.session is None)) and ((now() - self.lastupdate) > WikiSpaces.cachetime):
             return self.getlive()
         else:
-            self.spacestruct = self.dbtable_space.find_one(name=self.spacename)
+            self.spacestruct = self.dbtable_space.find_one(name = self.spacename)
             if self.spacestruct is None:
                 self.getlive()
             else:
@@ -238,7 +240,7 @@ class Space(WikiSpaces):
         self.lastupdate = now()
         self.spacestruct['cachetime'] = self.lastupdate
         self.spacestruct['cachetime_members'] = self.memberlist_time
-        self.dbtable_space.upsert(self.spacestruct, keys=['id']) #,ensure=True)
+        self.dbtable_space.upsert(self.spacestruct, keys = ['id'])  # ,ensure=True)
         loginfo('Space.getlive()@'.format(self.spacename))
         return self.spacestruct
 
@@ -246,7 +248,7 @@ class Space(WikiSpaces):
         if ((not (self.session is None)) and (len(self.memberlist) == 0) or ((now() - self.memberlist_time) > WikiSpaces.cachetime)):
             return self.listmemberslive()
         else:
-            s = self.dbtable_members.find(spaceid=self.spacestruct['id'])
+            s = self.dbtable_members.find(spaceid = self.spacestruct['id'])
             if not s is None:
                 self.memberlist = dict((m['username'], dict(m)) for m in s)
                 self.memberlist_time = self.spacestruct['cachetime_members']
@@ -256,14 +258,14 @@ class Space(WikiSpaces):
             return self.memberlist
 
     def listmemberscsvlive(self):
-        r = requests.get('https://openv.wikispaces.com/wiki/members', params={'utable': 'WikiTableMemberList', 'ut_csv': 1})
+        r = requests.get('https://openv.wikispaces.com/wiki/members', params = {'utable': 'WikiTableMemberList', 'ut_csv': 1})
         self.csvmemberlist = {}
-        for row in csv.reader(r.text.split('\n'), delimiter=',', quotechar='"'):
+        for row in csv.reader(r.text.split('\n'), delimiter = ',', quotechar = '"'):
             if len(row) > 1:
                 if row[2] != 'Type':
                     joined = WikiSpaces.gettimestampfromwstime(row[1])
                     self.csvmemberlist[row[0]] = {'joined': joined, 'type': row[2]}
-    
+
     def getmemberinfofromcsv(self, username):
         if self.csvmemberlist is None:
             self.listmemberscsvlive()
@@ -276,7 +278,7 @@ class Space(WikiSpaces):
         members = self.spaceApi.service.listMembers(self.session.session, self.spacestruct['id'])
         l = {}
         if len(self.memberlist) == 0:
-            s = self.dbtable_members.find(spaceid=self.spacestruct['id'])
+            s = self.dbtable_members.find(spaceid = self.spacestruct['id'])
             if not s is None:
                 self.memberlist = dict((m['username'], dict(m)) for m in s)
         delmembers = self.memberlist
@@ -287,7 +289,7 @@ class Space(WikiSpaces):
 
             if not m['username'] in self.memberlist:
                 m['joined'] = self.getmemberinfofromcsv(m['username'])['joined']
-                self.dbtable_members.insert(m) #, ensure=True) # SOAP API does not deliver userId for all users, so use username
+                self.dbtable_members.insert(m)  # , ensure=True) # SOAP API does not deliver userId for all users, so use username
                 self.dispatch('create', ('member', m))
                 loginfo('New member {} @{}'.format(m['username'], m['spaceid']))
             else:
@@ -301,7 +303,7 @@ class Space(WikiSpaces):
 
         for d in delmembers:
             d['deleted'] = self.memberlist_time
-            self.db.query('''UPDATE members SET deleted={:d} WHERE username='{}' AND deleted=0'''.format(d['deleted'], d['username'])) #, ensure=True) # SOAP API does not deliver userId for all users, so use username
+            self.db.query('''UPDATE members SET deleted={:d} WHERE username='{}' AND deleted=0'''.format(d['deleted'], d['username']))  # , ensure=True) # SOAP API does not deliver userId for all users, so use username
             self.dispatch('delete', ('member', d))
             loginfo('Deleted member {} @{}'.format(d['username'], d['spaceid']))
 
@@ -334,7 +336,7 @@ class Pages(WikiSpaces):
 
         try:
             self.dbtable_page = WikiSpaces.db.load_table('page')
-        except: #sqlalchemy.exc.NoSuchTableError as e:
+        except:  # sqlalchemy.exc.NoSuchTableError as e:
             # TODO: check if versionId could be used as PRIMARY KEY (versionId looks unique in _our_ data)
             WikiSpaces.db.query('''
                 CREATE TABLE page (
@@ -357,7 +359,7 @@ class Pages(WikiSpaces):
                     deleted INTEGER DEFAULT 0,
                     cachetime INTEGER,
                     PRIMARY KEY(id));''')
-            self.dbtable_page= WikiSpaces.db.load_table('page')
+            self.dbtable_page = WikiSpaces.db.load_table('page')
             self.dbtable_page.create_index(['id'])
             logging.info('Created database table page')
         self.pagelist = []
@@ -399,8 +401,8 @@ class Pages(WikiSpaces):
             else:
                 page = self.dbtable_page.find_one(name = pagename, spaceId = spaceid, order_by = '-date_created')
         else:
-            page = self.dbtable_page.find_one(spaceId=spaceid, versionId=pageversion)
-        if (not(self.session is None)) and ((page is None)): # or ((now() - page['cachetime']) > WikiSpaces.cachetime)):
+            page = self.dbtable_page.find_one(spaceId = spaceid, versionId = pageversion)
+        if (not(self.session is None)) and ((page is None)):  # or ((now() - page['cachetime']) > WikiSpaces.cachetime)):
             return self.getPagelive(pagename, pageversion, spaceid)
         else:
             return dict(page)
@@ -421,7 +423,7 @@ class Pages(WikiSpaces):
         page['cachetime'] = cachetime
         loginfo('Pages.getPagelive(pagename="{}", pageversion="{}")@{}'.format(pagename, str(pageversion), spaceid))
         oldver = self.dbtable_page.find_one(pageId = page['pageId'], spaceId = spaceid)
-        self.dbtable_page.insert(page, keys=['pageId', 'versionId']) #,ensure=True)
+        self.dbtable_page.insert(page, keys = ['pageId', 'versionId'])  # ,ensure=True)
 
         if oldver is None:
             self.dispatch('create', ('page', page))
@@ -513,7 +515,7 @@ class Messages(WikiSpaces):
 
         try:
             self.dbtable_message = WikiSpaces.db.load_table('message')
-        except: #sqlalchemy.exc.NoSuchTableError as e:
+        except:  # sqlalchemy.exc.NoSuchTableError as e:
             WikiSpaces.db.query('''
                 CREATE TABLE message (
                     id INTEGER,
@@ -531,7 +533,7 @@ class Messages(WikiSpaces):
                     deleted INTEGER DEFAULT 0,
                     cachetime INTEGER,
                     PRIMARY KEY(id));''')
-            self.dbtable_message= WikiSpaces.db.load_table('message')
+            self.dbtable_message = WikiSpaces.db.load_table('message')
             self.dbtable_message.create_index(['id'])
             logging.info('Created database table message')
         self.topiclist = {}
@@ -561,15 +563,15 @@ class Messages(WikiSpaces):
                 self.dispatch('create', ('topic', topic))
             else:
                 del(oldtopics[topic['topic_id']])
-            self.dbtable_message.upsert(topic, keys=['id']) #,ensure=True)
+            self.dbtable_message.upsert(topic, keys = ['id'])  # ,ensure=True)
         self.topiclist[pageid] = l
-        
+
         for t in oldtopics:
             t['deleted'] = cachetime
             self.db.query('''UPDATE message SET deleted={:d} WHERE topic_id={:d} AND deleted=0'''
                           .format(cachetime, t['topic_id']))
             self.dispatch('delete', ('topic', t))
-        
+
         loginfo('Messages.listTopicslive(pageid="{}")'.format(pageid))
         return self.topiclist[pageid]
 
@@ -587,7 +589,7 @@ class Messages(WikiSpaces):
     def listMessagesInTopiclive(self, topicid):
         try:
             messages = self.messageApi.service.listMessagesInTopic(self.session.session, topicid)
-        except: #xml.sax._exceptions.SAXParseException:
+        except:  # xml.sax._exceptions.SAXParseException:
             if len(_lastreply) == 0:
                 logging.error('Empty reply for Messages.listMessagesInTopiclive(topicid="{}")'.format(topicid))
             else:
@@ -602,12 +604,12 @@ class Messages(WikiSpaces):
             message = WikiSpaces.dict(message)
             message['cachetime'] = cachetime
             if not (message['id'] in oldmessages):
-                self.dbtable_message.insert(message) #,ensure=True)
+                self.dbtable_message.insert(message)  # ,ensure=True)
                 self.dispatch('create', ('message', message))
             else:
                 if (message['subject'] != oldmessages[message['id']]['subject']) or (message['body'] != oldmessages[message['id']]['body']):
                     self.dispatch('update', ('message', message))
-                self.dbtable_message.update(message, keys=['id']) #,ensure=True)
+                self.dbtable_message.update(message, keys = ['id'])  # ,ensure=True)
                 del(oldmessages[message['id']])
 
         for t in oldmessages:
@@ -636,7 +638,7 @@ class Users(WikiSpaces):
 
         try:
             self.dbtable_user = WikiSpaces.db.load_table('user')
-        except: #sqlalchemy.exc.NoSuchTableError as e:
+        except:  # sqlalchemy.exc.NoSuchTableError as e:
             WikiSpaces.db.query('''
                 CREATE TABLE user (
                     id INTEGER,
@@ -658,7 +660,7 @@ class Users(WikiSpaces):
 
     def getUser(self, username):
         user = self.dbtable_user.find_one(username = username)
-        if (not(self.session is None)) and ((user is None)):# or (now() - self.lastupdate) > WikiSpaces.cachetime):
+        if (not(self.session is None)) and ((user is None)):  # or (now() - self.lastupdate) > WikiSpaces.cachetime):
             return self.getUserlive(username)
         else:
             return dict(user)
@@ -669,10 +671,10 @@ class Users(WikiSpaces):
         user['cachetime'] = now()
         olduser = self.dbtable_user.find_one(username = user['username'])
         if olduser == None:
-            self.dbtable_user.insert(user) #,ensure=True)
+            self.dbtable_user.insert(user)  # ,ensure=True)
             self.dispatch('create', ('user', user))
         else:
-            self.dbtable_user.update(user, keys=['id']) #,ensure=True)
+            self.dbtable_user.update(user, keys = ['id'])  # ,ensure=True)
             # self.dispatch('update', ('user', user))
         loginfo('Users.getUserlive(username="{}")'.format(username))
         return user
@@ -680,7 +682,7 @@ class Users(WikiSpaces):
     def getUserById(self, userid):
         userid = int(userid)
         user = self.dbtable_user.find_one(id = userid)
-        if (not(self.session is None)) and ((user is None)):# or (now() - self.lastupdate) > WikiSpaces.cachetime):
+        if (not(self.session is None)) and ((user is None)):  # or (now() - self.lastupdate) > WikiSpaces.cachetime):
             return self.getUserByIdlive(userid)
         else:
             return dict(user)
@@ -692,14 +694,14 @@ class Users(WikiSpaces):
         user['cachetime'] = now()
         olduser = self.dbtable_user.find_one(username = user['username'])
         if olduser == None:
-            self.dbtable_user.insert(user) #,ensure=True)
+            self.dbtable_user.insert(user)  # ,ensure=True)
             self.dispatch('create', ('user', user))
         else:
-            self.dbtable_user.update(user, keys=['id']) #,ensure=True)
+            self.dbtable_user.update(user, keys = ['id'])  # ,ensure=True)
             # self.dispatch('update', ('user', user))
         loginfo('Users.getUserByIdlive(userid="{}")'.format(userid))
         return user
-    
+
 class Files(WikiSpaces):
     def __init__(self, space):
         if type(space) == Space:
@@ -710,12 +712,12 @@ class Files(WikiSpaces):
         else:
             self.spaceid = WikiSpaces.getspaceid(space)
 
-        self.spacename = WikiSpaces.getspacename(self.spaceid)            
+        self.spacename = WikiSpaces.getspacename(self.spaceid)
         self.init_events(['create', 'update', 'delete'])
 
         try:
             self.dbtable_file = WikiSpaces.db.load_table('file')
-        except: #sqlalchemy.exc.NoSuchTableError as e:
+        except:  # sqlalchemy.exc.NoSuchTableError as e:
             WikiSpaces.db.query('''
                 CREATE TABLE file (
                     id INTEGER NOT NULL,
@@ -732,26 +734,36 @@ class Files(WikiSpaces):
             self.dbtable_file = WikiSpaces.db.load_table('file')
             self.dbtable_file.create_index(['id'])
             logging.info('Created database table file')
-            
+
             self.filelist = {}
-    
+
+    def getAllFiles(self):
+        filelist = self.getFilelistlive()
+        for filename in filelist:
+            fileinfo = self.dbtable_file.find_one(name = filename, order_by = '-date_created')
+            if not fileinfo is None:
+                timediff = (filelist[filename]['date_created'] - fileinfo['date_created'])
+                if not timediff in [0, 3600]:  # TODO: check why/when diff of 3600 occurred
+                    loginfo('File {} has as changed, get versions from history page'.format(filename))
+                    self.getFileHistorylive(filename)
+
     def getFilelistlive(self):
         # for files, and their versions, we need to scrape the info from web pages, as there is no dedicated API
-        r = requests.get("https://{}.wikispaces.com/space/content".format(self.spacename), params={'utable': 'WikiTablePageList', 'ut_csv': 1})
-        
-        oldfiles = self.dbtable_file.distinct('name', spaceid=self.spaceid)
+        r = requests.get("https://{}.wikispaces.com/space/content".format(self.spacename), params = {'utable': 'WikiTablePageList', 'ut_csv': 1})
+
+        oldfiles = self.dbtable_file.distinct('name', spaceid = self.spaceid)
         oldfiles = dict((f['name'], dict(f)) for f in oldfiles)
         cachetime = now()
-        
+
         self.filelist = {}
-        for row in csv.reader(r.text.split('\n'), delimiter=',', quotechar='"'):
-                # Type,Name,Size,Status,Last Edited By,Date Last Edited (America/Los_Angeles)                                                                                                                             
-                # "file","04102012_vito.zip","12324","active","ceteris_paribus","2012-10-04 12:22:01"
+        for row in csv.reader(r.text.split('\n'), delimiter = ',', quotechar = '"'):
+            # Type,Name,Size,Status,Last Edited By,Date Last Edited (America/Los_Angeles)
+            # "file","04102012_vito.zip","12324","active","ceteris_paribus","2012-10-04 12:22:01"
             if len(row) > 1:
                 if row[0] == 'file' :
-                    date_created = WikiSpaces.gettimestampfromwstime(row[5])
+                    date_created = WikiSpaces.gettimestampfromwstime(row[5]) + (8 * 3600)
                     self.filelist[row[1]] = {'name': row[1], 'size': row[2], 'username': row[5], 'date_created': date_created}
-                    
+
                     if (row[1] in oldfiles):
                         del(oldfiles[row[1]])
 
@@ -759,9 +771,9 @@ class Files(WikiSpaces):
             f['deleted'] = cachetime
             self.db.query('''UPDATE file SET deleted={:d} WHERE name='{}' AND spaceid={:d} AND deleted=0'''.format(cachetime, f['name'], self.spaceid))
             self.dispatch('delete', ('file', f))
-    
+
         return self.filelist
-    
+
     def getFileHistorylive(self, filename):
         # get history of file from webpage, as there's no SOAP API for file versions
         # TODO: make this work when pagination of history (>20 versions?) comes into play
@@ -775,19 +787,19 @@ class Files(WikiSpaces):
         oldfiles = dict((f['id'], dict(f)) for f in oldfiles)
         numoldfiles = len(oldfiles)
         historyrows = Selector(text = r.text).xpath('//div[@id="WikiTableFileHistoryList"]/table/tbody/tr')
-        
+
         filehistory = {}
         iserror = False
         for historyrow in historyrows:
             try:
-                fileurl = "http://{}.wikispaces.com{}".format(self.spacename, historyrow.xpath('.//td[2]/a/@href').extract()[0].replace('/file/detail/','/file/view/'))
+                fileurl = "http://{}.wikispaces.com{}".format(self.spacename, historyrow.xpath('.//td[2]/a/@href').extract()[0].replace('/file/detail/', '/file/view/'))
             except IndexError:
                 # WS does not deliver a 404 error in this case, just  <td colspan="5" class="noDataHolder">No page history.</td>
                 iserror = True
                 break
             fileuser = historyrow.xpath('.//td[5]/a[2]/text()').extract()[0].strip()
             fileversion = int(fileurl.split('/').pop())
-            
+
             if (fileversion in oldfiles):
                 if int(oldfiles[fileversion]['deleted']) > 0:
                     # un-deleted file:
@@ -795,30 +807,31 @@ class Files(WikiSpaces):
                     self.db.query('''UPDATE file SET deleted=0 WHERE id={:d} AND spaceid={:d} AND deleted>0'''
                                   .format(fileversion, self.spaceid))
                     self.dispatch('update', ('file', oldfiles[fileversion]))
-                    
+
                 filehistory[fileversion] = oldfiles[fileversion]
                 del(oldfiles[fileversion])
             else:
                 # New version found
                 r = requests.get(fileurl)
                 if r.status_code == requests.codes.ok:
-                    lastmodified = WikiSpaces.gettimestampfromwstime(r.headers.get("Last-Modified"), f='%a, %d %b %Y %X %Z')
+                    lastmodified = WikiSpaces.gettimestampfromwstime(r.headers.get("Last-Modified"), f = '%a, %d %b %Y %X %Z')
                     newfile = {'id': fileversion,
                                'name': filename,
                                'size': r.headers.get('Content-Length'),
                                'type': r.headers.get('Content-Type'),
                                'username': fileuser,
                                'spaceid': self.spaceid,
+                               'date_created': lastmodified,
                                'deleted': 0,
                                'cachetime': now()}
 
                     newfile['content'] = r.content
                     self.dbtable_file.insert(newfile)
-                    
+
                     # We do not want to hand over content due to possible large size
                     del(newfile['content'])
 
-                    loginfo('Downloaded {} from {}'.format(filename, newfile))
+                    loginfo('Downloaded {} from {}'.format(filename, fileurl))
                     if numoldfiles == 0:
                         self.dispatch('create', ('file', newfile))
                     else:
@@ -826,11 +839,11 @@ class Files(WikiSpaces):
 
                     numoldfiles += 1
                     filehistory[fileversion] = newfile
-                    
+
                 else:
                     logging.error('Could not download {} from {}'.format(filename, fileurl))
 
-        if (len(oldfiles)>0) and (not iserror):
+        if (len(oldfiles) > 0) and (not iserror):
             for f in oldfiles:
                 f['deleted'] = now()
                 self.db.query('''UPDATE file SET deleted={:d} WHERE id={:d} AND spaceid={:d} AND deleted=0'''
@@ -842,7 +855,7 @@ class Files(WikiSpaces):
         else:
             logging.error('Could not getFileHistorylive({})@{:d}'.format(filename, self.spaceid))
             return None
-    
+
 def do_alltext(spacename, s):
     pages = Pages(spacename, s)
     allpages = pages.getPageslive()
@@ -856,9 +869,9 @@ def do_allusers(spacename, s):
     space = Space(spacename, s)
     users = Users(s)
     l = space.listmembers()
-    for k,v in l.items():
+    for k, v in l.items():
         users.getUser(k)
-        
+
 
 class Subscriber:
     def __init__(self, name = None):
@@ -875,17 +888,18 @@ class Subscriber:
 
 class GitFastEx(Subscriber):
     def __init__(self, outputdir = None):
-        self.db = WikiSpaces.db # TODO: Ceck if this is wise
+        self.db = WikiSpaces.db  # TODO: Ceck if this is wise
         # create a - hopefully unique - string to be used as a separator/EOT mark
         self.eotsign = hashlib.sha224(urandom(64)).hexdigest()
         self.now = datetime.datetime.utcnow()
         self.outputdir = '.' if outputdir is None else outputdir
+        self.pausenotifications = False
 
     def outfile(self, prefix = None):
         filetimestr = '{:%Y%m%d%H%M%S}'.format(self.now)
         return "{}/{}wiki.gitfastimport-{}".format(self.outputdir, '' if prefix is None else ''.join(s for s in [prefix, '.']), filetimestr)
 
-    def page2gitfast(self, pageid, versionid = None, linktopics = True, converter = lambda x: x):
+    def page2gitfast(self, pageid, versionid = None, linktopics = True, converter = lambda x: mdconvert(x)):
         if versionid is None:
             page = self.db['page'].find_one(pageId = pageid)
         else:
@@ -901,12 +915,12 @@ class GitFastEx(Subscriber):
                         ORDER BY page.date_created DESC'''.format(pageid, versionsel)
         print(query)
         q = self.db.query(query)
-        
+
         try:
             page = dict([l for l in q][0])
         except IndexError:
-            page = None 
-       
+            page = None
+
         if not page is None:
             if page['name'] == 'space.menu':
                 page['name'] = 'Sidebar'
@@ -915,13 +929,13 @@ class GitFastEx(Subscriber):
             if page['name'] == 'home':
                 page['name'] = 'Home'
 
-            fastimport =  "commit refs/heads/master\n"
+            fastimport = "commit refs/heads/master\n"
             fastimport += "committer {} <userid-{:d}@{}.wikispaces> {:%a, %e %b %Y %H:%M:%S}Z\n".format(page['user_created_username'], page['user_created'], page['spacename'], datetime.datetime.fromtimestamp(page['date_created']))
             fastimport += "data <<EOT{}\n".format(self.eotsign)
             fastimport += "versionId {:d}\n".format(page['versionId'])
             fastimport += page['comment'] if not page['comment'] is None else '' + "\n"
             fastimport += "EOT{}\n\n".format(self.eotsign)
-            
+
             fastimport += "M 100644 inline {}.md\n".format(slugify(page['name']))
             fastimport += "data <<EOT{}\n".format(self.eotsign)
             # fastimport += "={}=\n".format(page['name'])
@@ -952,7 +966,7 @@ class GitFastEx(Subscriber):
                 fastimport += pagetopics
 
             fastimport += "EOT{}\n\n".format(self.eotsign)
-            
+
             return fastimport
         else:
             return ''
@@ -968,25 +982,25 @@ class GitFastEx(Subscriber):
                         LEFT JOIN space ON page.spaceid = space.id
                         WHERE message.topic_id = {:d} AND message.deleted = 0 {}
                         ORDER BY message.date_created ASC'''.format(topicid, datecut))
-       
+
         for message in messages:
             if first:
                 first = False
                 # we choose flat names, as GH wiki doesn't support dirs/namespaces/slashes in page names
                 topicwikiname = "{}-Topic-{}-{:d}".format(slugify(message['pagename']), slugify(message['subject']), message['topic_id'])
                 filename = topicwikiname + ".md"
-                
+
                 if message['subject'] == '':
                     message['subject'] = 'Topic {}'.format(message['pagename'])
-                    
+
                 topic_subject = message['subject']
-                
+
                 topictext = "={}=\n" .format(topic_subject)
                 topictext += "Wiki-Page [[{}]] Discussion\n\n".format(message['pagename'])
             else:
                 if message['subject'] == '':
                     message['subject'] = 'Re: {}'.format(topic_subject)
-                    
+
                 topictext += "\n\n----\n\n"
                 topictext += "==Re: {}==\n".format(message['subject'])
 
@@ -1001,22 +1015,25 @@ class GitFastEx(Subscriber):
             fastimport += "data <<EOT{}\n".format(self.eotsign)
             fastimport += "Import of message in topic '{}' on page '{}'\n".format(topic_subject, message['pagename'])
             fastimport += "EOT{}\n\n".format(self.eotsign)
-    
+
             fastimport += "M 100644 inline {}\n".format(filename)
             fastimport += "data <<EOT{}\n".format(self.eotsign)
             fastimport += topictext
             fastimport += "\nEOT{}\n\n".format(self.eotsign)
-    
+
             return fastimport
         else:
             return ''
-        
-    def update_message(self, message):
-        pass
-    
-    def create_member(self, message):
-        logging.debug('{} got update member event for "{}"'.format(self.name, message[0]))
 
+    def update_message(self, message):
+        if self.pausenotifications:
+            return
+        pass
+
+    def create_member(self, message):
+        if self.pausenotifications:
+            return
+        logging.debug('{} got update member event for "{}"'.format(self.name, message[0]))
 
 def mdconvert(t):
     wp = WikispacesToMarkdownConverter(t, {})
@@ -1032,7 +1049,7 @@ http://openv.wikispaces.com/sitemap.xml
 if __name__ == "__main__":
     import configparser, os
 
-    logging.basicConfig(format='%(asctime)s: %(levelname)s: %(message)s', level=logging.INFO)
+    logging.basicConfig(format = '%(asctime)s: %(levelname)s: %(message)s', level = logging.INFO)
 
     try:
         config = configparser.ConfigParser.SafeConfigParser({'user':'', 'password':''})
@@ -1045,7 +1062,7 @@ if __name__ == "__main__":
         section = 'wikispaces'
     else:
         try:
-            section=config.sections()[0]
+            section = config.sections()[0]
         except IndexError:
             section = 'DEFAULT'
 
@@ -1058,12 +1075,13 @@ if __name__ == "__main__":
 
     w = Site()
     s = w.login(username, password)
-    
+
     space = Space(spacename, s)
-    
+
     f = Files(spacename)
-    #print(f.getFileHistorylive('Platine_bestückt.jpg')) #CHECK: OK
-    print(f.getFileHistorylive('vcontrold.xml'))
+    # print(f.getFileHistorylive('Platine_bestückt.jpg')) #CHECK: OK
+    # print(f.getFileHistorylive('vcontrold.xml'))
+    f.getAllFiles()
     '''
     g = GitFastEx()
     
