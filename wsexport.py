@@ -140,7 +140,7 @@ class Site(WikiSpaces):
 
     def login(self, username, password):
         self.session = Session(self.siteApi.service.login(username, password))
-        loginfo('Logged in as user {}'.format(username))
+        logging.debug('Logged in as user {}'.format(username))
         self.dispatch('create', ('session', self.session))
         return self.session
 
@@ -1326,25 +1326,21 @@ if __name__ == "__main__":
         
         for u, w in changes:
             if u == 'user':
+                space = Space(spacename, s)
+                users = Users(s)
                 if w == '*':
-                    space = Space(spacename, s)
-                    users = Users(s)
                     l = space.listmembers()
                     for k, v in l.items():
                         users.getUser(k)
                 else:
-                    space = Space(spacename, s)
                     space.getMember(w)
-                    users = Users(s)
                     users.getUser(w)
                 
             elif u == 'page':
+                pages = Pages(spacename, s)
                 if w == '*':
-                    pages = Pages(spacename, s)
                     allpages = pages.getPageslive()
                 else:
-                    space = Space(spacename, s)
-                    pages = Pages(spacename, s)
                     pages.getPageVersionslive(w)
                     
             elif u == 'share': # topic
@@ -1363,6 +1359,14 @@ if __name__ == "__main__":
                         messages = Messages(s)
                         messages.listMessagesInTopiclive(w)
 
+            elif u == 'file':
+                files = Files(spacename)
+                if w == '*':
+                    files.getAllFiles()
+                else:
+                    files.getFileHistorylive(w)
+            else:
+                raise(Exception('Unknown update type "{}"'.format(u)))
     
 
     '''
