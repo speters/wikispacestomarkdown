@@ -1209,7 +1209,6 @@ def getchanges(spacename):
     r = requests.get("http://{}.wikispaces.com/wiki/changes".format(spacename), params)
     html = r.text
     
-   
     #html=open('changes-test', 'r').read()
     
     links = Selector(text = html).xpath('//div[@class="col-md-9"]//strong/a[1]/@href').extract()
@@ -1238,8 +1237,8 @@ def getchanges(spacename):
         getalltypes.add('user')
         loging.info('Need to check all members for new users')
     
-    if getalltypes == set():
-        logging.info('No need for complete update run')
+    if getalltypes != set():
+        logging.info('Complete update run needed!')
     
     urls = list(set(links)) # make unique
     changeslist = []
@@ -1264,22 +1263,29 @@ def getchanges(spacename):
             continue
         
         if u == 'message':
-            # we have message-id but we need topic-id to query via SOAP API
-            location = None
             try:
-                # Get topic_id by going through redirection hell
-                r = requests.head(url, allow_redirects=True)
-                location = [resp.headers.get('Location') for resp in r.history][-1]
+                message = WikiSpaces.db['message'].find_one(id = w.split('/')[-1])
             except:
+                message = None
+            if message is None:
+                # we have message-id but we need topic-id to query via SOAP API
                 location = None
-                
-            if not location is None:
-                p = urlparse(location).path[1:]
-                (u, _, x) = p.split('/', maxsplit = 2)
-                if u != 'share':
-                    raise(Exception('Unknown redirection to link type {}'.format(u)))
-                
-                w = (w, x) # (messageid, topicid)
+                try:
+                    # Get topic_id by going through redirection hell
+                    r = requests.head(url, allow_redirects=True)
+                    location = [resp.headers.get('Location') for resp in r.history][-1]
+                except:
+                    location = None
+                    
+                if not location is None:
+                    p = urlparse(location).path[1:]
+                    (u, _, x) = p.split('/', maxsplit = 2)
+                    if u != 'share':
+                        raise(Exception('Unknown redirection to link type {}'.format(u)))
+                    
+                    w = (w, x) # (messageid, topicid)
+            else:
+                continue
         
         changeslist.append((u, w))
     
@@ -1354,7 +1360,7 @@ if __name__ == "__main__":
                         #logging.info('messages.getAllMessagesInPage({})'.format(page['name']))
                 else:
                     (messageid, topicid) = w
-                    message = WikiSpaces.db['message'].find(id = messageid)
+                    message = WikiSpaces.db['message'].find_one(id = messageid)
                     if message is None:
                         messages = Messages(s)
                         messages.listMessagesInTopiclive(w)
