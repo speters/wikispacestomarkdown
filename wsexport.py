@@ -42,12 +42,8 @@ def slugify(s):
 
 loginfo = logging.info
 
-
 def now():
     return int(datetime.datetime.utcnow().timestamp())
-
-def res2dict(p):
-    return [dict(m) for m in p] if not p is None else None
 
 class WikiSpaces(object):
     urlformat = 'http://www.wikispaces.com/{}/api'
@@ -869,23 +865,6 @@ class Files(WikiSpaces):
             logging.error('Could not getFileHistorylive({})@{:d}'.format(filename, self.spaceid))
             return None
 
-def do_alltext(spacename, s):
-    pages = Pages(spacename, s)
-    allpages = pages.getPageslive()
-
-    messages = Messages(s)
-    for page in allpages:
-        messages.getAllMessagesInPage(page['pageId'])
-        logging.info('messages.getAllMessagesInPage({})'.format(page['name']))
-
-def do_allusers(spacename, s):
-    space = Space(spacename, s)
-    users = Users(s)
-    l = space.listmembers()
-    for k, v in l.items():
-        users.getUser(k)
-
-
 class Subscriber:
     def __init__(self, name = None):
         self.name = self.__class__.__name__ if name is None else name
@@ -1264,7 +1243,8 @@ def getchanges(spacename):
         
         if u == 'message':
             try:
-                message = WikiSpaces.db['message'].find_one(id = w.split('/')[-1])
+                w = w.split('/')[-1]
+                message = WikiSpaces.db['message'].find_one(id = w)
             except:
                 message = None
             if message is None:
@@ -1286,7 +1266,7 @@ def getchanges(spacename):
                     w = (w, x) # (messageid, topicid)
             else:
                 continue
-        
+
         changeslist.append((u, w))
     
     changeslist += [(u, '*') for u in getalltypes]
@@ -1363,7 +1343,7 @@ if __name__ == "__main__":
                     message = WikiSpaces.db['message'].find_one(id = messageid)
                     if message is None:
                         messages = Messages(s)
-                        messages.listMessagesInTopiclive(w)
+                        messages.listMessagesInTopiclive(topicid)
 
             elif u == 'file':
                 files = Files(spacename)
@@ -1371,6 +1351,7 @@ if __name__ == "__main__":
                     files.getAllFiles()
                 else:
                     files.getFileHistorylive(w)
+  
             else:
                 raise(Exception('Unknown update type "{}"'.format(u)))
     
@@ -1404,6 +1385,4 @@ if __name__ == "__main__":
         users.getUser(k)
    
     #print(messages.listTopicslive(228816816))
-    # do_allusers(spacename, s)
-    #do_alltext(spacename, s)
 '''
