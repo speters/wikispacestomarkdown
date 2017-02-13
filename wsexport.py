@@ -54,7 +54,7 @@ class WikiSpaces(object):
     # wikispaces "stamdard" timestamp seems to be in PST (Pacific Standard Time / UTC - 8h), whileas we live in CET / UTC +1h
     # we could stay in this TZ, but then git logs also show this TZ, which is annoying
     # to adjust the timestamp to the actual displayed time of our TZ (CET), it's neccessary to substract 9h:
-    timeoffset = -8 * 3600
+    timeoffset = 8 * 3600
     db = None
 
     @staticmethod
@@ -191,6 +191,7 @@ class Space(WikiSpaces):
                     date_exported_page INTEGER DEFAULT 0,
                     date_exported_message INTEGER DEFAULT 0,
                     date_exported_file INTEGER DEFAULT 0,
+                    date_changes_check INTEGER DEFAULT 0,
                     PRIMARY KEY(id));''')
             self.dbtable_space = WikiSpaces.db.load_table('space')
             self.dbtable_space.create_index(['id'])
@@ -275,7 +276,7 @@ class Space(WikiSpaces):
             return self.csvmemberlist[username]
         except KeyError:
             return None
-    
+
     def getMember(self, username):
         member = self.dbtable_members.find_one(username=username)
         if member is None:
@@ -311,8 +312,7 @@ class Space(WikiSpaces):
             l[m['username']] = m
 
         for d in delmembers:
-            d['deleted'] = self.memberlist_time
-            self.db.query('''UPDATE members SET deleted={:d} WHERE username='{}' AND deleted=0'''.format(d['deleted'], d['username']))  # , ensure=True) # SOAP API does not deliver userId for all users, so use username
+            self.db.query('''UPDATE members SET deleted={:d} WHERE username='{}' AND deleted=0'''.format(self.memberlist_time, d['username']))  # , ensure=True) # SOAP API does not deliver userId for all users, so use username
             self.dispatch('delete', ('member', d))
             loginfo('Deleted member {} @{}'.format(d['username'], d['spaceid']))
 
@@ -432,7 +432,7 @@ class Pages(WikiSpaces):
         page['cachetime'] = cachetime
         loginfo('Pages.getPagelive(pagename="{}", pageversion="{}")@{}'.format(pagename, str(pageversion), spaceid))
         oldver = self.dbtable_page.find_one(pageId = page['pageId'], spaceId = spaceid)
-        self.dbtable_page.insert(page, keys = ['pageId', 'versionId'])  # ,ensure=True)
+        self.dbtable_page.insert(page) # ,ensure=True)
 
         if oldver is None:
             self.dispatch('create', ('page', page))
@@ -446,6 +446,7 @@ class Pages(WikiSpaces):
             spaceid = self.spaceid
 
         pagelist = self.pageApi.service.listPageVersions(self.session.session, spaceid, pagename)
+
         cachetime = now()
         p = []
         for page in pagelist:
@@ -752,7 +753,7 @@ class Files(WikiSpaces):
             fileinfo = self.dbtable_file.find_one(name = filename, order_by = '-date_created')
             if not fileinfo is None:
                 timediff = (filelist[filename]['date_created'] - fileinfo['date_created'])
-                if not timediff in [0, 3600]:  # TODO: check why/when diff of 3600 occurred
+                if not timediff in [-3600, 0, 3600]:  # TODO: check why/when diff of 3600 occurred
                     loginfo('File {} has as changed, get versions from history page'.format(filename))
                     self.getFileHistorylive(filename)
 
@@ -770,7 +771,7 @@ class Files(WikiSpaces):
             # "file","04102012_vito.zip","12324","active","ceteris_paribus","2012-10-04 12:22:01"
             if len(row) > 1:
                 if row[0] == 'file' :
-                    date_created = WikiSpaces.gettimestampfromwstime(row[5]) + (8 * 3600)
+                    date_created = WikiSpaces.gettimestampfromwstime(row[5]) + Wikispaces.timeoffset
                     self.filelist[row[1]] = {'name': row[1], 'size': row[2], 'username': row[5], 'date_created': date_created}
 
                     if (row[1] in oldfiles):
@@ -890,7 +891,7 @@ class GitFastEx(Subscriber):
     def outfile(self, prefix = None):
         filetimestr = '{:%Y%m%d%H%M%S}'.format(self.now)
         return "{}/{}-{}.gitfastimport".format(self.outputdir, 'wiki' if prefix is None else prefix, filetimestr)
-    
+
     def writegitfast(self, fastimport, prefix = None):
         if len(fastimport) > 0:
             output = open(self.outfile(prefix), 'ab')
@@ -931,10 +932,10 @@ class GitFastEx(Subscriber):
 
         self.db.query('UPDATE space SET date_exported_page={:d} WHERE id={:d}'.format(int(self.now.timestamp()), spaceid))
         loginfo('Exported {:d} pageversions to {}'.format(i, self.outfile('{}-pages-{:d}'.format(space['name'], fromdate))))
-    
+
     def export_all_topics(self, spaceid):
         return self.export_topics(spaceid, fromdate = 0)
-    
+
     def export_topics(self, spaceid, fromdate = None):
         space = self.db['space'].find_one(id=int(spaceid))
         if space is None:
@@ -942,12 +943,12 @@ class GitFastEx(Subscriber):
             return
         else:
             space = dict(space)
-        
+
         if fromdate is None:
             fromdate = int(space['date_exported_message'])
         else:
             fromdate = int(fromdate)
-            
+
         query = '''SELECT m.topic_id, m.date_created
                     FROM message m
                     LEFT JOIN page p ON m.page_id = p.pageId
@@ -957,17 +958,17 @@ class GitFastEx(Subscriber):
                         AND m.date_created > {:d}
                     ORDER BY m.date_created ASC'''.format(spaceid, fromdate)
         q = self.db.query(query)
-        
+
         i = 0
         if not q is None:
             for message in q:
                 fastimport = self.topic2gitfast(message['topic_id'], message['date_created'])
                 self.writegitfast(fastimport, '{}-topics-{:d}'.format(space['name'], fromdate))
                 i += 1
-        
+
         self.db.query('UPDATE space SET date_exported_message={:d} WHERE id={:d}'.format(int(self.now.timestamp()), spaceid))
         loginfo('Exported {:d} topicversions to {}'.format(i, self.outfile('{}-topics-{:d}'.format(space['name'], fromdate))))
-        
+
     def export_all_files(self, spaceid):
         return self.export_files(spaceid, fromdate = 0)
 
@@ -1120,7 +1121,7 @@ class GitFastEx(Subscriber):
             fastimport += "\nEOT{}\n\n".format(self.eotsign)
 
             return fastimport.encode('utf-8')
-        
+
     def file2gitfast(self, versionid):
         # TODO: Make sure file id is really uniquely provided by WikiSpaces
         q = self.db.query('''SELECT f.*, u.id AS userid, s.name AS spacename
@@ -1134,7 +1135,7 @@ class GitFastEx(Subscriber):
         except IndexError:
             file = None
             logging.error('Could not retrieve file with id {:d} from db'.format(versionid))
-        
+
         if file is None:
             return
         else:
@@ -1164,7 +1165,7 @@ class GitFastEx(Subscriber):
 
 def mdconvert(text):
     '''Convert WikiSpaces markup to MarkDown
-    
+
     Keyword argumens:
     text -- markup text to convert
     '''
@@ -1173,10 +1174,20 @@ def mdconvert(text):
 
 def getchanges(spacename):
     '''Check http://{SPACENAME}.wikispaces.com/wiki/changes for changes.
-    
+
     Keyword arguments:
     spacename -- Name of the wikispaces space name to observe
     '''
+    
+    getalltypes = set()
+    if WikiSpaces.db is None:
+        raise(Exception('WikiSpaces.db not opened (no Site() instance?)'))
+    space = WikiSpaces.db['space'].find_one(name = spacename)
+    if space is None:
+        return [('space', '*'), ('page', '*'), ('message', '*'), ('user', '*'), ('file', '*')]
+    else:
+        space = dict(space)
+    
     params = {'showPage': 1,
               'showMsg': 1,
               'showComment': 0, # Not used in openv wiki
@@ -1187,26 +1198,28 @@ def getchanges(spacename):
               'go': 1}
     r = requests.get("http://{}.wikispaces.com/wiki/changes".format(spacename), params)
     html = r.text
-    
+
     #html=open('changes-test', 'r').read()
-    
+
     links = Selector(text = html).xpath('//div[@class="col-md-9"]//strong/a[1]/@href').extract()
-    #textrows = [l for l in Selector(text = html).xpath('//div[@class="col-md-9"]/text()').extract() if l.strip() != '']
+    dates = Selector(text = html).xpath('//div[@class="col-md-3"]//abbr[@class="WikispacesTooltip"]/@title').extract()
+    latest_change = WikiSpaces.gettimestampfromwstime(dates[0], '%A, %b %d, %Y %I:%M %p')
     
+    if space['date_changes_check'] > latest_change:
+        logging.info('No changes since last check')
+        return []
+
     nextlink = Selector(text = html).xpath('//a[@id="pagerNext"]/@href').extract()[0]
     nextlinkinfo = dict((a, b[0]) for a,b in parse_qs(urlparse(nextlink).query).items())
-    
-    getalltypes = set()
-    if WikiSpaces.db is None:
-        raise(Exception('WikiSpaces.db not opened (no Site() instance?)'))
+
     q = WikiSpaces.db['page'].find_one(versionId = nextlinkinfo['latest_id_page'])
     if q is None:
         getalltypes.add('page')
-        loging.info('Need to check all pages for new versions')
+        logging.info('Need to check all pages for new versions')
     WikiSpaces.db['message'].find_one(id = nextlinkinfo['latest_id_msg'])
     if q is None:
         getalltypes.add('message')
-        loging.info('Need to check all topics for new messagess')
+        logging.info('Need to check all topics for new messagess')
     WikiSpaces.db['file'].find_one(id = nextlinkinfo['latest_id_file'])
     if q is None:
         getalltypes.add('file')
@@ -1214,11 +1227,11 @@ def getchanges(spacename):
     WikiSpaces.db['user'].find_one(id = nextlinkinfo['latest_id_user_add'])
     if q is None:
         getalltypes.add('user')
-        loging.info('Need to check all members for new users')
-    
+        logging.info('Need to check all members for new users')
+
     if getalltypes != set():
         logging.info('Complete update run needed!')
-    
+
     urls = list(set(links)) # make unique
     changeslist = []
     for url in links:
@@ -1230,17 +1243,17 @@ def getchanges(spacename):
         try:
             (u, _, w) = p.split('/', maxsplit = 2)
         except ValueError:
-            w = p
+            w = p.replace('+', ' ') # TODO: Check if this replacement is OK for all pages
             u = 'page'
             pass
 
         if not u in ['page', 'message', 'user', 'file']:
             raise(Exception('Unknown link type "{}"'.format(u)))
-        
+
         if u in getalltypes:
             # if we have to get all of this type anyway, we don't bother with single changes
             continue
-        
+
         if u == 'message':
             try:
                 w = w.split('/')[-1]
@@ -1256,25 +1269,27 @@ def getchanges(spacename):
                     location = [resp.headers.get('Location') for resp in r.history][-1]
                 except:
                     location = None
-                    
+
                 if not location is None:
                     p = urlparse(location).path[1:]
                     (u, _, x) = p.split('/', maxsplit = 2)
                     if u != 'share':
                         raise(Exception('Unknown redirection to link type {}'.format(u)))
-                    
+                    else:
+                        u = 'message'
+
                     w = (w, x) # (messageid, topicid)
             else:
                 continue
 
         changeslist.append((u, w))
-    
+
     changeslist += [(u, '*') for u in getalltypes]
     changeslist = list(set(changeslist)) # make unique
 
     return changeslist
-        
-        
+
+
 if __name__ == "__main__":
     import configparser, os
 
@@ -1303,13 +1318,16 @@ if __name__ == "__main__":
         spacename = 'openv'
 
     w = Site()
-    
-    changes = getchanges('openv')
+
+    changes = getchanges(spacename)
     if len(changes) == 0:
         exit('No changes, nothing to do.')
     else:
         s = w.login(username, password)
-        
+
+        space = Space(spacename, s)
+        space.get()
+
         for u, w in changes:
             if u == 'user':
                 space = Space(spacename, s)
@@ -1321,19 +1339,19 @@ if __name__ == "__main__":
                 else:
                     space.getMember(w)
                     users.getUser(w)
-                
+
             elif u == 'page':
                 pages = Pages(spacename, s)
                 if w == '*':
                     allpages = pages.getPageslive()
                 else:
                     pages.getPageVersionslive(w)
-                    
-            elif u == 'share': # topic
+
+            elif u == 'message': # topic
                 if w == '*':
                     pages = Pages(spacename, s)
                     allpages = pages.listPages()
-                
+
                     messages = Messages(s)
                     for page in allpages:
                         messages.getAllMessagesInPage(page['pageId'])
@@ -1351,13 +1369,13 @@ if __name__ == "__main__":
                     files.getAllFiles()
                 else:
                     files.getFileHistorylive(w)
-  
+
             else:
                 raise(Exception('Unknown update type "{}"'.format(u)))
-    
-
+            
+        WikiSpaces.db['space'].update(dict(id = space.spacestruct['id'], date_changes_check= now()), ['id'])
     '''
-    
+
     space = Space(spacename, s)
     space.getlive()
 
@@ -1371,7 +1389,7 @@ if __name__ == "__main__":
     #print(g.outfile('präfi'))
     g.export_all_pages(space.spaceid)
     #g.export_all_topics(space.spaceid)
-    
+
     #print(g.outfile()) # checked OK
     #print(g.topic2gitfast(18814747, lambda x: x.replace(' ', '_')))
     print(g.page2gitfast(3087287, converter=lambda x: mdconvert(x)))
@@ -1383,6 +1401,6 @@ if __name__ == "__main__":
     l = space.listmembers()
     for k,v in l.items():
         users.getUser(k)
-   
+
     #print(messages.listTopicslive(228816816))
 '''
