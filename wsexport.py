@@ -529,7 +529,7 @@ class Messages(WikiSpaces):
             WikiSpaces.db.query('''
                 CREATE TABLE message (
                     id INTEGER,
-                    subject VARCHAR NOT NULL,
+                    subject VARCHAR,
                     body TEXT NOT NULL,
                     html TEXT,
                     page_id INTEGER NOT NULL,
@@ -756,6 +756,9 @@ class Files(WikiSpaces):
                 if not timediff in [-3600, 0, 3600]:  # TODO: check why/when diff of 3600 occurred
                     loginfo('File {} has as changed, get versions from history page'.format(filename))
                     self.getFileHistorylive(filename)
+            else:
+                loginfo('File {} not in db, get versions from history page'.format(filename))
+                self.getFileHistorylive(filename)
 
     def getFilelistlive(self):
         # for files, and their versions, we need to scrape the info from web pages, as there is no dedicated API
@@ -771,7 +774,7 @@ class Files(WikiSpaces):
             # "file","04102012_vito.zip","12324","active","ceteris_paribus","2012-10-04 12:22:01"
             if len(row) > 1:
                 if row[0] == 'file' :
-                    date_created = WikiSpaces.gettimestampfromwstime(row[5]) + Wikispaces.timeoffset
+                    date_created = WikiSpaces.gettimestampfromwstime(row[5]) + WikiSpaces.timeoffset
                     self.filelist[row[1]] = {'name': row[1], 'size': row[2], 'username': row[5], 'date_created': date_created}
 
                     if (row[1] in oldfiles):
@@ -1178,16 +1181,22 @@ def getchanges(spacename):
     Keyword arguments:
     spacename -- Name of the wikispaces space name to observe
     '''
-    
+
     getalltypes = set()
     if WikiSpaces.db is None:
         raise(Exception('WikiSpaces.db not opened (no Site() instance?)'))
-    space = WikiSpaces.db['space'].find_one(name = spacename)
-    if space is None:
+    
+    try:
+            WikiSpaces.db.load_table('space')
+    except:  # sqlalchemy.exc.NoSuchTableError as e:
+        return [('space', '*'), ('page', '*'), ('message', '*'), ('user', '*'), ('file', '*')]
+    
+    spacestruct = WikiSpaces.db['space'].find_one(name = spacename)
+    if spacestruct is None:
         return [('space', '*'), ('page', '*'), ('message', '*'), ('user', '*'), ('file', '*')]
     else:
-        space = dict(space)
-    
+        spacestruct = dict(spacestruct)
+
     params = {'showPage': 1,
               'showMsg': 1,
               'showComment': 0, # Not used in openv wiki
@@ -1204,10 +1213,12 @@ def getchanges(spacename):
     links = Selector(text = html).xpath('//div[@class="col-md-9"]//strong/a[1]/@href').extract()
     dates = Selector(text = html).xpath('//div[@class="col-md-3"]//abbr[@class="WikispacesTooltip"]/@title').extract()
     latest_change = WikiSpaces.gettimestampfromwstime(dates[0], '%A, %b %d, %Y %I:%M %p')
-    
-    if space['date_changes_check'] > latest_change:
+
+    '''
+    if spacestruct['date_changes_check'] > latest_change:
         logging.info('No changes since last check')
         return []
+    '''
 
     nextlink = Selector(text = html).xpath('//a[@id="pagerNext"]/@href').extract()[0]
     nextlinkinfo = dict((a, b[0]) for a,b in parse_qs(urlparse(nextlink).query).items())
@@ -1216,15 +1227,15 @@ def getchanges(spacename):
     if q is None:
         getalltypes.add('page')
         logging.info('Need to check all pages for new versions')
-    WikiSpaces.db['message'].find_one(id = nextlinkinfo['latest_id_msg'])
+    q = WikiSpaces.db['message'].find_one(id = nextlinkinfo['latest_id_msg'])
     if q is None:
         getalltypes.add('message')
         logging.info('Need to check all topics for new messagess')
-    WikiSpaces.db['file'].find_one(id = nextlinkinfo['latest_id_file'])
+    q = WikiSpaces.db['file'].find_one(id = nextlinkinfo['latest_id_file'])
     if q is None:
         getalltypes.add('file')
-        loging.info('Need to check all files for new versions')
-    WikiSpaces.db['user'].find_one(id = nextlinkinfo['latest_id_user_add'])
+        logging.info('Need to check all files for new versions')
+    q = WikiSpaces.db['user'].find_one(id = nextlinkinfo['latest_id_user_add'])
     if q is None:
         getalltypes.add('user')
         logging.info('Need to check all members for new users')
@@ -1320,17 +1331,18 @@ if __name__ == "__main__":
     w = Site()
 
     changes = getchanges(spacename)
+
     if len(changes) == 0:
         exit('No changes, nothing to do.')
     else:
         s = w.login(username, password)
-
         space = Space(spacename, s)
         space.get()
 
         for u, w in changes:
-            if u == 'user':
-                space = Space(spacename, s)
+            if u == 'space':
+                pass
+            elif u == 'user':
                 users = Users(s)
                 if w == '*':
                     l = space.listmembers()
@@ -1372,7 +1384,7 @@ if __name__ == "__main__":
 
             else:
                 raise(Exception('Unknown update type "{}"'.format(u)))
-            
+
         WikiSpaces.db['space'].update(dict(id = space.spacestruct['id'], date_changes_check= now()), ['id'])
     '''
 
