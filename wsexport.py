@@ -152,8 +152,11 @@ class Space(WikiSpaces):
         self.spaceApi = Client(Space.url, doctor = WikiSpaces.doctor)
         self.session = session
         self.spacename = spacename
+        self.spaceid = None
         self.init_events(['create', 'update', 'delete'])  # A bit misleading, because these are events regarding members
         self.csvmemberlist = None
+        self.memberlist = {}
+        self.memberlist_time = 0
 
         try:
             self.dbtable_space = WikiSpaces.db.load_table('space')
@@ -197,13 +200,7 @@ class Space(WikiSpaces):
             self.dbtable_space.create_index(['id'])
             logging.info('Created database table space')
 
-        s = self.dbtable_space.find_one(name = self.spacename)
-        if not s is None:
-            self.spacestruct = dict(s)
-            self.lastupdate = self.spacestruct['cachetime']
-            self.spaceid = self.spacestruct['id']
-        else:
-            self.lastupdate = 0
+        self.get()
 
         try:
             self.dbtable_members = WikiSpaces.db.load_table('members')
@@ -222,20 +219,25 @@ class Space(WikiSpaces):
             self.dbtable_members.create_index(['username', 'spaceid'])
             logging.info('Created database table members')
 
-        self.memberlist = {}
-        self.memberlist_time = 0
 
     def get(self):
-        if (not (self.session is None)) and ((now() - self.lastupdate) > WikiSpaces.cachetime):
-            return self.getlive()
-        else:
-            self.spacestruct = self.dbtable_space.find_one(name = self.spacename)
-            if self.spacestruct is None:
-                self.getlive()
+        self.spacestruct = self.dbtable_space.find_one(name = self.spacename)
+        if self.spacestruct is None:
+            if (self.session is None):
+                logging.error('No space {} in db. Valid session needed for space.getlive()'.format(self.spacename))
+                return None
             else:
-                self.spacestruct = dict(self.spacestruct)
-                self.lastupdate = self.spacestruct['cachetime']
-            return self.spacestruct
+                self.getlive()
+        else:
+            if ((now() - self.spacestruct['cachetime']) > WikiSpaces.cachetime):
+                if self.session is None:
+                    logging.info('Max cachetime reached, but no valid session for space.getlive(). Using old data...')
+                else:
+                    self.getlive()
+            self.spacestruct = dict(self.spacestruct)
+            self.lastupdate = self.spacestruct['cachetime']
+            self.spaceid = self.spacestruct['id']
+        return self.spacestruct
 
     def getlive(self):
         space = self.spaceApi.service.getSpace(self.session.session, self.spacename)
@@ -244,7 +246,8 @@ class Space(WikiSpaces):
         self.spacestruct['cachetime'] = self.lastupdate
         self.spacestruct['cachetime_members'] = self.memberlist_time
         self.dbtable_space.upsert(self.spacestruct, keys = ['id'])  # ,ensure=True)
-        loginfo('Space.getlive()@'.format(self.spacename))
+        self.spaceid = self.spacestruct['id'] 
+        loginfo('Space.getlive()@{}'.format(self.spaceid))
         return self.spacestruct
 
     def listmembers(self):
@@ -319,7 +322,7 @@ class Space(WikiSpaces):
         self.memberlist = l
         self.dbtable_space.update(dict(id = self.spacestruct['id'], cachetime_members = self.memberlist_time), ['id'])
         self.spacestruct['cachetime_members'] = self.memberlist_time
-        loginfo('Space.listmemberslive()@'.format(self.spacename))
+        loginfo('Space.listmemberslive()@{}'.format(self.spaceid))
         return self.memberlist
 
     def __str__(self):
@@ -1222,26 +1225,31 @@ def getchanges(spacename):
 
     nextlink = Selector(text = html).xpath('//a[@id="pagerNext"]/@href').extract()[0]
     nextlinkinfo = dict((a, b[0]) for a,b in parse_qs(urlparse(nextlink).query).items())
-
+    logging.debug("nextlinkinfo", nextlinkinfo)
     q = WikiSpaces.db['page'].find_one(versionId = nextlinkinfo['latest_id_page'])
     if q is None:
         getalltypes.add('page')
-        logging.info('Need to check all pages for new versions')
+        logging.info('Need to check all pages for new versions (page versionid {} not found)'.format(nextlinkinfo['latest_id_page']))
+
     q = WikiSpaces.db['message'].find_one(id = nextlinkinfo['latest_id_msg'])
     if q is None:
         getalltypes.add('message')
-        logging.info('Need to check all topics for new messagess')
+        logging.info('Need to check all topics for new messages (message id {} not found)'.format(nextlinkinfo['latest_id_msg']))
+  
     q = WikiSpaces.db['file'].find_one(id = nextlinkinfo['latest_id_file'])
     if q is None:
         getalltypes.add('file')
-        logging.info('Need to check all files for new versions')
-    q = WikiSpaces.db['user'].find_one(id = nextlinkinfo['latest_id_user_add'])
-    if q is None:
+        logging.info('Need to check all files for new versions (file id {} not found)'.format(nextlinkinfo['latest_id_file']))
+    
+    if int(nextlinkinfo['latest_id_user_add']) == 0:
+        # TODO: this looks like another bug at WikiSpaces, maybe we could try tu use latest_date_user_add instead
         getalltypes.add('user')
-        logging.info('Need to check all members for new users')
-
-    if getalltypes != set():
-        logging.info('Complete update run needed!')
+        logging.info('Need to check all members for new users (latest_id_user_add == {})'.format(nextlinkinfo['latest_id_user_add']))
+    else:
+        q = WikiSpaces.db['user'].find_one(id = nextlinkinfo['latest_id_user_add'])
+        if q is None:
+            getalltypes.add('user')
+            logging.info('Need to check all members for new users (user id {} not found)'.format(nextlinkinfo['latest_id_user_add']))
 
     urls = list(set(links)) # make unique
     changeslist = []
