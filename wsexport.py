@@ -246,7 +246,7 @@ class Space(WikiSpaces):
         self.spacestruct['cachetime'] = self.lastupdate
         self.spacestruct['cachetime_members'] = self.memberlist_time
         self.dbtable_space.upsert(self.spacestruct, keys = ['id'])  # ,ensure=True)
-        self.spaceid = self.spacestruct['id'] 
+        self.spaceid = self.spacestruct['id']
         loginfo('Space.getlive()@{}'.format(self.spaceid))
         return self.spacestruct
 
@@ -315,9 +315,10 @@ class Space(WikiSpaces):
             l[m['username']] = m
 
         for d in delmembers:
-            self.db.query('''UPDATE members SET deleted={:d} WHERE username='{}' AND deleted=0'''.format(self.memberlist_time, d['username']))  # , ensure=True) # SOAP API does not deliver userId for all users, so use username
+            #self.db.query('''UPDATE members SET deleted={:d} WHERE username='{}' AND deleted=0'''.format(self.memberlist_time, d)) # SOAP API does not deliver userId for all users, so use username
+            self.db.query('''DELETE FROM members WHERE username='{}' '''.format(d)) # SOAP API does not deliver userId for all users, so use username
             self.dispatch('delete', ('member', d))
-            loginfo('Deleted member {} @{}'.format(d['username'], d['spaceid']))
+            loginfo('Deleted member {} @{}'.format(d , self.spacestruct['id']))
 
         self.memberlist = l
         self.dbtable_space.update(dict(id = self.spacestruct['id'], cachetime_members = self.memberlist_time), ['id'])
@@ -682,7 +683,7 @@ class Users(WikiSpaces):
         user = self.userApi.service.getUser(self.session.session, username)
         user = WikiSpaces.dict(user)
         user['cachetime'] = now()
-        olduser = self.dbtable_user.find_one(username = user['username'])
+        olduser = self.dbtable_user.find_one(id = user['id'])
         if olduser == None:
             self.dbtable_user.insert(user)  # ,ensure=True)
             self.dispatch('create', ('user', user))
@@ -1188,12 +1189,12 @@ def getchanges(spacename):
     getalltypes = set()
     if WikiSpaces.db is None:
         raise(Exception('WikiSpaces.db not opened (no Site() instance?)'))
-    
+
     try:
             WikiSpaces.db.load_table('space')
     except:  # sqlalchemy.exc.NoSuchTableError as e:
         return [('space', '*'), ('page', '*'), ('message', '*'), ('user', '*'), ('file', '*')]
-    
+
     spacestruct = WikiSpaces.db['space'].find_one(name = spacename)
     if spacestruct is None:
         return [('space', '*'), ('page', '*'), ('message', '*'), ('user', '*'), ('file', '*')]
@@ -1235,12 +1236,12 @@ def getchanges(spacename):
     if q is None:
         getalltypes.add('message')
         logging.info('Need to check all topics for new messages (message id {} not found)'.format(nextlinkinfo['latest_id_msg']))
-  
+
     q = WikiSpaces.db['file'].find_one(id = nextlinkinfo['latest_id_file'])
     if q is None:
         getalltypes.add('file')
         logging.info('Need to check all files for new versions (file id {} not found)'.format(nextlinkinfo['latest_id_file']))
-    
+
     if int(nextlinkinfo['latest_id_user_add']) == 0:
         # TODO: this looks like another bug at WikiSpaces, maybe we could try tu use latest_date_user_add instead
         getalltypes.add('user')
