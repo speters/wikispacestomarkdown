@@ -1177,6 +1177,8 @@ def mdconvert(text):
     text -- markup text to convert
     '''
     wp = WikispacesToMarkdownConverter(text, {})
+    wp.options['filelocation'] = 'files/'
+    wp.options['imagelocation'] = 'files/'
     return wp.run()
 
 def getchanges(spacename):
@@ -1243,14 +1245,27 @@ def getchanges(spacename):
         logging.info('Need to check all files for new versions (file id {} not found)'.format(nextlinkinfo['latest_id_file']))
 
     if int(nextlinkinfo['latest_id_user_add']) == 0:
-        # TODO: this looks like another bug at WikiSpaces, maybe we could try tu use latest_date_user_add instead
-        getalltypes.add('user')
-        logging.info('Need to check all members for new users (latest_id_user_add == {})'.format(nextlinkinfo['latest_id_user_add']))
+        # FIXME: this looks like another bug at WikiSpaces
+        
+        q = WikiSpaces.db.query('''SELECT joined
+                    FROM members
+                    ORDER BY joined
+                    LIMIT 1''')
+
+        try:
+            latestmember = dict([l for l in q][0])
+        except IndexError:
+            getalltypes.add('user')
+            logging.info('Need to check all members for new users (no member found)')
+            
+        if (int(nextlinkinfo['latest_date_user_add']) + WikiSpaces.timeoffset) > int(latestmember['joined']):
+            getalltypes.add('user')
+            logging.info('Need to check all members for new users (latest joined in db < latest_date_user_add)')
     else:
         q = WikiSpaces.db['user'].find_one(id = nextlinkinfo['latest_id_user_add'])
         if q is None:
             getalltypes.add('user')
-            logging.info('Need to check all members for new users (user id {} not found)'.format(nextlinkinfo['latest_id_user_add']))
+            logging.info('Need to check all members for new users (user id {:d} not found)'.format(nextlinkinfo['latest_id_user_add']))
 
     urls = list(set(links)) # make unique
     changeslist = []
