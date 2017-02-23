@@ -1265,7 +1265,7 @@ def getchanges(spacename):
         q = WikiSpaces.db['user'].find_one(id = nextlinkinfo['latest_id_user_add'])
         if q is None:
             getalltypes.add('user')
-            logging.info('Need to check all members for new users (user id {:d} not found)'.format(nextlinkinfo['latest_id_user_add']))
+            logging.info('Need to check all members for new users (user id {} not found)'.format(nextlinkinfo['latest_id_user_add']))
 
     urls = list(set(links)) # make unique
     changeslist = []
