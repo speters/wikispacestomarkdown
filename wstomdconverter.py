@@ -23,8 +23,8 @@ class VersionInfo:
     version = '0.1.1'
     name = 'Wikispaces To Markdown Converter'
     shortname = 'wikispaces2md'
-    url = 'http://wiki.df.dreamhosters.com/wiki/Wikispaces_to_markdown_Converter'
-    author='Daniel Folkinshteyn'
+    url = 'https://github.com/speters/wikispacestomarkdown/'
+    # author='Daniel Folkinshteyn'
 
 class Starter:
     '''Grabs cli options, and runs the converter on specified files.'''
