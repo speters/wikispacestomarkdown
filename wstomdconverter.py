@@ -20,8 +20,9 @@ import random
 
 class VersionInfo:
     '''Just a container for some information.'''
-    version = '0.0.1'
+    version = '0.1.1'
     name = 'Wikispaces To Markdown Converter'
+    shortname = 'wikispaces2md'
     url = 'http://wiki.df.dreamhosters.com/wiki/Wikispaces_to_markdown_Converter'
     author='Daniel Folkinshteyn'
 
@@ -149,7 +150,7 @@ class WikispacesToMarkdownConverter:
 
     def remove_misc(self):
         ''' Gives an easy way to detect converter type'''
-        self.content = self.content.replace('[[WikiText]]', '[MarkDown]')
+        self.content = self.content.replace('[[WikiText]]', '[{}-{}]'.format(VersionInfo().shortname, VersionInfo().version))
 
         '''remove the [[toc]] since markdown does it by default'''
         self.content = re.sub(r'\n?\[\[toc(\|flat)?\]\]', r'', self.content)
