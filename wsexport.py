@@ -21,15 +21,12 @@ import csv
 import requests
 from urllib.parse import urlparse, parse_qs
 
-
 from wstomdconverter import WikispacesToMarkdownConverter
-from reportlab.platypus import tableofcontents
 from scrapy.selector import Selector
-from pyxb.bundles.wssplat.raw.wsa import From
 
 logging.getLogger("requests").setLevel(logging.WARNING)
 
-_lastreply = ''
+lastreply = ''
 def replyfilter(r):
     lastreply = r
     return r
@@ -885,15 +882,15 @@ class Subscriber:
     def delete(self, message):
         logging.debug('{} got delete message type "{}"'.format(self.name, message[0]))
 
-
 class GitFastEx(Subscriber):
-    def __init__(self, outputdir = None):
+    def __init__(self, outputdir = None, link_topics = True):
         self.db = WikiSpaces.db  # TODO: Ceck if this is wise
         # create a - hopefully unique - string to be used as a separator/EOT mark
         self.eotsign = hashlib.sha224(urandom(64)).hexdigest()
         self.now = datetime.datetime.utcnow()
         self.outputdir = '.' if outputdir is None else outputdir
         self.pausenotifications = False
+        self.link_topics = True if link_topics else False
 
     def outfile(self, prefix = None):
         filetimestr = '{:%Y%m%d%H%M%S}'.format(self.now)
@@ -921,13 +918,24 @@ class GitFastEx(Subscriber):
         else:
             fromdate = int(fromdate)
 
-        query = '''SELECT p.pageId, p.versionId
+        query = '''SELECT p.pageId, p.versionId, t.topicdate
                     FROM page p
+                    LEFT JOIN
+                        (
+                            SELECT MIN(m.date_created) AS topicdate
+                            FROM message m
+                            GROUP BY m.topic_id
+                        ) t
+                        ON p.pageId = t.page_id
                     WHERE
                         p.deleted = 0
-                        AND p.spaceId={:d}
-                        AND p.date_created > {:d}
-                    ORDER BY p.date_created ASC'''.format(spaceid, fromdate)
+                        AND p.spaceId = {:d}
+                        AND (
+                                (p.date_created > {:d})
+                                OR
+                                (t.mindate <= p.date_created AND t.topicdate > {:d})
+                            )
+                    ORDER BY p.date_created ASC'''.format(spaceid, fromdate, fromdate)
         q = self.db.query(query)
 
         i = 0
@@ -1020,7 +1028,7 @@ class GitFastEx(Subscriber):
                         FROM page
                         LEFT JOIN space ON page.spaceId = space.id
                         WHERE page.pageId = {:d} AND page.deleted = 0 {}
-                        ORDER BY page.date_created DESC'''.format(pageid, versionsel)
+                        ORDER BY page.date_created DESC'''.format(int(pageid), versionsel)
         q = self.db.query(query)
 
         try:
@@ -1049,28 +1057,29 @@ class GitFastEx(Subscriber):
 
             fastimport += converter(page['content']) + "\n"
 
-            topics = self.db.query('''SELECT DISTINCT message.topic_id, message.*
-                        FROM message
-                        WHERE message.page_id = {:d}
-                            AND message.deleted = 0
-                            AND subject <> ''
-                            AND message.date_created <= {:d}
-                        ORDER BY message.date_created ASC
-                        '''.format(page['pageId'], page['date_created']))
+            if self.link_topics:
+                topics = self.db.query('''SELECT DISTINCT message.topic_id, message.*
+                            FROM message
+                            WHERE message.page_id = {:d}
+                                AND message.deleted = 0
+                                AND subject <> ''
+                                AND message.date_created <= {:d}
+                            ORDER BY message.date_created ASC
+                            '''.format(int(page['pageId']), int(page['date_created'])))
 
-            pagetopics = ''
-            for topic in topics:
-                if topic['subject'] == '':
-                    topic['subject'] = topic['pagename']
+                pagetopics = ''
+                for topic in topics:
+                    if topic['subject'] == '':
+                        topic['subject'] = topic['pagename']
 
-                # we choose flat names, as GH wiki doesn't support dirs/namespaces/slashes in page names
-                topicwikiname = "{}-Topic-{}-{:d}".format(slugify(page['name']), slugify(topic['subject']), topic['topic_id'])
-                # build wiki list of topics for inclusion in wiki page
-                pagetopics += "* [[{}|{}]]\n".format(topicwikiname, topic['subject'])
+                    # we choose flat names, as GH wiki doesn't support dirs/namespaces/slashes in page names
+                    topicwikiname = "{}-Topic-{}-{:d}".format(slugify(page['name']), slugify(topic['subject']), topic['topic_id'])
+                    # build wiki list of topics for inclusion in wiki page
+                    pagetopics += "* [[{}|{}]]\n".format(topicwikiname, topic['subject'])
 
-            if pagetopics != '':
-                fastimport += '\n\n----\n\n==Topics==\n\n'
-                fastimport += pagetopics
+                if pagetopics != '':
+                    fastimport += '\n\n----\n\n==Topics==\n\n'
+                    fastimport += pagetopics
 
             fastimport += "EOT{}\n\n".format(self.eotsign)
 
@@ -1080,13 +1089,13 @@ class GitFastEx(Subscriber):
         if dateline is None:
             datecut = ''
         else:
-            datecut = ' AND message.date_created <= {:d} '.format(dateline)
+            datecut = ' AND message.date_created <= {:d} '.format(int(dateline))
         messages = self.db.query('''SELECT DISTINCT message.id, message.*,page.name AS pagename, space.name AS spacename
                         FROM message
                         LEFT JOIN page ON message.page_id = page.pageId
                         LEFT JOIN space ON page.spaceid = space.id
                         WHERE message.topic_id = {:d} AND message.deleted = 0 {}
-                        ORDER BY message.date_created ASC'''.format(topicid, datecut))
+                        ORDER BY message.date_created ASC'''.format(int(topicid), datecut))
 
         first = True
         for message in messages:
@@ -1153,11 +1162,9 @@ class GitFastEx(Subscriber):
             fastimport += "EOT{}\n\n".format(self.eotsign)
 
             # TODO: use slugify(filename), but don't forget to change links in Wiki accordingly?
-            fastimport += "M 100644 inline {}\n".format(file['name'])
+            fastimport += "M 100644 inline files/{}\n".format(file['name'])
             fastimport += "data {:d}\n".format(len(file['content']))
 
-            #fastimport += file['content']
-            #fastimport += "\n\n"
             return fastimport.encode('utf-8') + file['content'] + "\n\n".encode('utf8')
 
     def update_message(self, message):
@@ -1173,7 +1180,7 @@ class GitFastEx(Subscriber):
 def mdconvert(text):
     '''Convert WikiSpaces markup to MarkDown
 
-    Keyword argumens:
+    Keyword arguments:
     text -- markup text to convert
     '''
     wp = WikispacesToMarkdownConverter(text, {})
@@ -1220,11 +1227,9 @@ def getchanges(spacename):
     dates = Selector(text = html).xpath('//div[@class="col-md-3"]//abbr[@class="WikispacesTooltip"]/@title').extract()
     latest_change = WikiSpaces.gettimestampfromwstime(dates[0], '%A, %b %d, %Y %I:%M %p')
 
-    '''
     if spacestruct['date_changes_check'] > latest_change:
         logging.info('No changes since last check')
         return []
-    '''
 
     nextlink = Selector(text = html).xpath('//a[@id="pagerNext"]/@href').extract()[0]
     nextlinkinfo = dict((a, b[0]) for a,b in parse_qs(urlparse(nextlink).query).items())
@@ -1246,7 +1251,7 @@ def getchanges(spacename):
 
     if int(nextlinkinfo['latest_id_user_add']) == 0:
         # FIXME: this looks like another bug at WikiSpaces
-        
+
         q = WikiSpaces.db.query('''SELECT joined
                     FROM members
                     ORDER BY joined
@@ -1257,7 +1262,7 @@ def getchanges(spacename):
         except IndexError:
             getalltypes.add('user')
             logging.info('Need to check all members for new users (no member found)')
-            
+
         if (int(nextlinkinfo['latest_date_user_add']) + WikiSpaces.timeoffset) > int(latestmember['joined']):
             getalltypes.add('user')
             logging.info('Need to check all members for new users (latest joined in db < latest_date_user_add)')
@@ -1354,11 +1359,10 @@ if __name__ == "__main__":
 
     w = Site()
 
+    checkdate = now()
     changes = getchanges(spacename)
 
-    if len(changes) == 0:
-        exit('No changes, nothing to do.')
-    else:
+    if len(changes) > 0:
         s = w.login(username, password)
         space = Space(spacename, s)
         space.get()
@@ -1409,7 +1413,10 @@ if __name__ == "__main__":
             else:
                 raise(Exception('Unknown update type "{}"'.format(u)))
 
-        WikiSpaces.db['space'].update(dict(id = space.spacestruct['id'], date_changes_check= now()), ['id'])
+        WikiSpaces.db['space'].update(dict(id = space.spacestruct['id'], date_changes_check= checkdate), ['id'])
+
+    #g = GitFastEx()
+    #print(g.topic2gitfast(18814747, converter = lambda x: x.replace(' ', '_')))
     '''
 
     space = Space(spacename, s)
