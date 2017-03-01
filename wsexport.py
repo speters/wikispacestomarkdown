@@ -24,7 +24,12 @@ from urllib.parse import urlparse, parse_qs
 from wstomdconverter import WikispacesToMarkdownConverter
 from scrapy.selector import Selector
 
+from github import Github
+
 logging.getLogger("requests").setLevel(logging.WARNING)
+
+# Seconds to wait between Github issue creations to prevent rate limiting from kicking in
+ghwait = 3
 
 lastreply = ''
 def replyfilter(r):
@@ -941,7 +946,7 @@ class GitFastEx(Subscriber):
         i = 0
         if not q is None:
             for page in q:
-                fastimport = self.page2gitfast(page['pageId'], page['versionId'])
+                fastimport = self.page2gitfast(page['pageId'], page['versionId'], self.link_topics)
                 self.writegitfast(fastimport, '{}-pages-{:d}'.format(space['name'], fromdate))
                 i += 1
 
@@ -1057,7 +1062,7 @@ class GitFastEx(Subscriber):
 
             fastimport += converter(page['content']) + "\n"
 
-            if self.link_topics:
+            if linktopics:
                 topics = self.db.query('''SELECT DISTINCT message.topic_id, message.*
                             FROM message
                             WHERE message.page_id = {:d}
@@ -1176,6 +1181,138 @@ class GitFastEx(Subscriber):
         if self.pausenotifications:
             return
         logging.debug('{} got update member event for "{}"'.format(self.name, message[0]))
+
+class GitHubIssueEx(Subscriber):
+    def __init__(self, ghuser, owner, repo, ghpass = None):
+        self.db = WikiSpaces.db
+        self.gh_repo = repo
+        self.gh = Github(ghuser, ghpass)
+        if owner is None:
+            owner = self.gh.get_user().login
+        self.gh_owner = owner
+        self.repo = self.gh.get_user(self.gh_owner).get_repo(self.gh_repo)
+        logging.debug("Accessing Github with login={}, repo.owner={}, repo.name={}".format(self.gh_owner, self.repo.owner.login, self.repo.name))
+
+        try:
+            self.db.load_table('ghissues')
+        except:  # sqlalchemy.exc.NoSuchTableError as e:
+            WikiSpaces.db.query('''
+                CREATE TABLE ghissues (
+                    messageId INTEGER NOT NULL,
+                    owner VARCHAR NOT NULL,
+                    repoName VARCHAR NOT NULL,
+                    issueNumber INTEGER NOT NULL DEFAULT NULL,
+                    commentId INTEGER DEFAULT 0,
+                    date_exported INTEGER NOT NULL,
+                    PRIMARY KEY(messageId));''')
+            self.db.load_table('ghissues')
+
+    def newIssues(self, spaceId, fromdate = 0):
+        # FYI: https://github.com/WikiSpaxe/openvtest/issues/new?labels[]=bug&labels[]=duplicate&title=Re:Page&body=Hello+World
+        #      CONTRIBUTING.md in repo to get a hint when posting new issue
+        i = now()
+        spaceinfo = list(self.db.query('SELECT * FROM space WHERE id={:d}'.format(int(spaceId))))[0]
+        spacename = spaceinfo['name']
+        spaceid = int(spaceinfo['id'])
+
+        '''
+        rate = self.gh.get_rate_limit()
+        if rate.rate.remaining == 0:
+            logging.error("GitHub rate limit: {}, remaining: {}:, reset: {:%a, %e %b %Y %H:%M:%S} UT".format(rate.rate.limit, rate.rate.remaining, rate.rate.reset))
+            return 0
+        '''
+
+        def msg2issue(message, isreply = False):
+            if isreply:
+                topictext = "* Subject: Re: {}\n".format(message['subject'])
+            else:
+                topictext = "* Subject: {}\n".format(message['subject'])
+
+            topictext += "* From: {} <userid-{:d}${}.wikispaces>\n".format(message['user_created_username'], message['user_created'], message['spacename'])
+            topictext += "* Date: {:%a, %e %b %Y %H:%M:%S} UT\n".format(datetime.datetime.fromtimestamp(message['date_created']))
+            topictext += "* Message-ID: <{:d}-{:d}${}.wikispaces>\n".format(message['topic_id'], message['id'], message['spacename'])
+            if isreply and not message['firstmsgid'] is None:
+                topictext += "* In-Reply-To: <{:d}-{:d}${}.wikispaces>\n".format(message['topic_id'], message['firstmsgid'], message['spacename'])
+            topictext += '\n'
+            topictext += mdconvert(message['body'])
+            return topictext
+
+        query = '''
+            SELECT
+                DISTINCT(m.id), m.*,
+                p.spaceId,
+                t.firstmsgid,
+                t.topic_subject,
+                c.*,
+                i.issueNumber AS issueNum
+            FROM message m
+            LEFT JOIN page p ON m.page_id = p.pageId
+            INNER JOIN (SELECT MIN(id) AS firstmsgid, topic_id, subject AS topic_subject
+                            FROM message
+                            GROUP BY topic_id ) t
+                        ON m.topic_id = t.topic_id
+            LEFT OUTER JOIN ghissues c ON m.id = c.messageId
+            LEFT JOIN ghissues i ON t.firstmsgid = i.messageId
+            WHERE
+                p.spaceId = {:d}
+                AND
+                m.date_created > {:d}
+                AND
+                m.deleted = 0
+                AND
+                c.issueNumber IS NULL
+            ORDER BY m.date_created ASC
+            '''.format(int(spaceid), int(fromdate))
+
+        issues = self.db.query(query)
+
+        n = 0
+        gh_new_issues = {}
+        for issue in issues:
+            n+=1
+            if issue['subject'] is None or issue['subject'] == '':
+                issue['subject'] = issue['topic_subject']
+            issue['spacename'] = spacename
+
+            if (issue['issueNum'] is None) and not (issue['topic_id'] in gh_new_issues):
+                # new issue on GH
+                body = msg2issue(message = issue, isreply = False)
+
+                new_issue = self.repo.create_issue(issue['subject'], body)
+
+                # GitHub seems to have a special rate limit for issue cration of 20 issues/min
+                time.sleep(ghwait)
+
+                self.db.query('''INSERT INTO ghissues
+                                   (messageId, owner, repoName, issueNumber, commentId, date_exported )
+                                   VALUES
+                                   ({:d}, '{}', '{}', {:d}, {:d}, {:d})
+                               '''.format(int(issue['id']), self.gh_owner, self.gh_repo, int(new_issue.number), 0, int(new_issue.created_at.timestamp())))
+                gh_new_issues[issue['topic_id']] = new_issue
+                logging.info('message.id {} exported to {}'.format(issue['id'], new_issue.url))
+            else:
+                # new comment on GH
+                if not (issue['issueNum'] is None):
+                    # issue existed in DB
+                    new_issue = self.repo.get_issue(issue['issueNum'])
+                else:
+                    # we just created, so use cached
+                    new_issue = gh_new_issues[issue['topic_id']]
+
+                body = msg2issue(message = issue, isreply = True)
+                new_comment = new_issue.create_comment(body)
+
+                # GitHub seems to have a special rate limit for issue cration of 20 issues/min
+                time.sleep(ghwait)
+
+                self.db.query('''INSERT INTO ghissues
+                                   (messageId, owner, repoName, issueNumber, commentId, date_exported )
+                                   VALUES
+                                   ({:d}, '{}', '{}', {:d}, {:d}, {:d})
+                               '''.format(int(issue['id']), self.gh_owner, self.gh_repo, int(new_issue.number), new_comment.id, int(new_comment.created_at.timestamp())))
+                logging.info('message.id {} exported to {}'.format(issue['id'], new_comment.url))
+
+        return n
 
 def mdconvert(text):
     '''Convert WikiSpaces markup to MarkDown
@@ -1333,7 +1470,7 @@ def getchanges(spacename):
 if __name__ == "__main__":
     import configparser, os
 
-    logging.basicConfig(format = '%(asctime)s: %(levelname)s: %(message)s', level = logging.INFO)
+    logging.basicConfig(format = '%(asctime)s: %(levelname)s: %(message)s', level = logging.DEBUG)
 
     try:
         config = configparser.ConfigParser.SafeConfigParser({'user':'', 'password':''})
@@ -1356,6 +1493,24 @@ if __name__ == "__main__":
         spacename = config.get(section, 'space')
     except configparser.NoOptionError:
         spacename = 'openv'
+
+    try:
+        githubsection = config.get(section, 'github')
+    except configparser.NoOptionError:
+        pass
+
+    if config.has_section(githubsection):
+        try:
+            ghuser = config.get(githubsection, 'access-token')
+            ghpass = None
+        except configparser.NoOptionError:
+            ghuser = config.get(githubsection, 'username')
+            ghpass = config.get(githubsection, 'password')
+        try:
+            ghowner = config.get(githubsection, 'owner')
+        except configparser.NoOptionError:
+            ghowner = None
+        ghrepo = config.get(githubsection, 'repo')
 
     w = Site()
 
@@ -1417,6 +1572,13 @@ if __name__ == "__main__":
 
     #g = GitFastEx()
     #print(g.topic2gitfast(18814747, converter = lambda x: x.replace(' ', '_')))
+
+    s = w.login(username, password)
+    space = Space(spacename, s)
+    space.get()
+    ghi = GitHubIssueEx(ghuser, ghowner, ghrepo, ghpass)
+    print(ghi.newIssues(space.spaceid))
+
     '''
 
     space = Space(spacename, s)
