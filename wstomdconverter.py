@@ -174,9 +174,9 @@ class WikispacesToMarkdownConverter:
 
     def parse_headings(self):
         def do_replace(matchobj):
-            return "\n" + ('#' * min(6, len(matchobj.group(1)))) + " " + matchobj.group(2)
+            return "\n" + ('#' * min(6, len(matchobj.group(1)))) + " " + matchobj.group(2) + matchobj.group(3)
         """ change headings. This has to occur after parse_olists() """
-        self.content = re.sub(r'\n *(=+)\s*(.*?)\s*=+', do_replace, self.content)
+        self.content = re.sub(r'\n *(=+)\s*(.*?)\s*=+(\s*\n)', do_replace, self.content)
 
     def parse_italics(self):
         """change italics from // to * """
