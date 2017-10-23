@@ -91,6 +91,12 @@ class WikispacesToMarkdownConverter:
         except KeyError:
                 self.options['imagelocation'] = '%s'
 
+        try:
+            if callable(self.options['link_filter']):
+                self.link_filter = self.options['link_filter']
+        except KeyError:
+            self.link_filter = (lambda m,n: (m, n))
+
         self.extended_start = False
         self.extended_end = False
 
@@ -210,11 +216,32 @@ class WikispacesToMarkdownConverter:
         self.content = re.sub(r'\[\[file:([^|\]]*)\|([^\]]*)\]\]', r'[\2](' + self.options['filelocation'].replace('%s', r'\1') + r')', self.content)
         self.content = re.sub(r'\[\[file:([^|\]]*)\]\]', r'[\1](' + self.options['filelocation'].replace('%s', r'\1') + r')', self.content)
 
+    def _link_filter(self, m):
+        url = m.group(1)
+        try:
+            text = m.group(2)
+        except IndexError:
+            text = url
+
+        ret = self.link_filter(url, text)
+        try:
+            returl, rettext = ret
+        except ValueError:
+            returl = ret
+            rettext = returl
+
+        #return "[{}]({})".format(rettext, returl.replace(' ', '-'))
+        return "[{}]({})".format(rettext, returl)
+
+
     def parse_links(self):
         # change [[...]] and [[...|...]] links
         # TODO: catch links to other wikis in the form [[Wiki:Page]] and [[Wiki:Page|Linktext]]
-        self.content = re.sub(r'\[\[([^|\]]*)\|([^\]]*)\]\]', r'[\2](\1)', self.content)
-        self.content = re.sub(r'\[\[([^|\]]*)\]\]', r'[\1](\1)', self.content)
+        #self.content = re.sub(r'\[\[([^|\]]*)\|([^\]]*)\]\]', r'[\2](\1)', self.content)
+        #self.content = re.sub(r'\[\[([^|\]]*)\]\]', r'[\1](\1)', self.content)
+        # TODO: Check if this working not just for gollum, but also for gh-pages jekyll
+        self.content = re.sub(r'\[\[([^|\]]*)\|([^\]]*)\]\]', self._link_filter, self.content)
+        self.content = re.sub(r'\[\[([^|\]]*)\]\]', self._link_filter, self.content)
 
     def parse_underline(self):
         """change underline from __ to _ """
