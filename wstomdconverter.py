@@ -188,35 +188,7 @@ class WikispacesToMarkdownConverter:
         """change italics from // to * """
         self.content = re.sub(r'(?<!http:)(?<!https:)(?<!ftp:)//', r"*", self.content)
 
-    def parse_external_links(self):
-        '''change external link format, and free 'naked' external links.
-
-        external links with labels get single-braces instead of double
-        and space instead of pipe as delimiter between url and label
-
-        naked external links (those without label) simply get stripped of
-        braces, since that produces the equivalent output in markdown.
-        '''
-        # change external link format
-        self.content = re.sub(r'\[\[@?(https?://[^|\]]*)\|([^\]]*)\]\]', r'[\2](\1)', self.content)
-        self.content = re.sub(r'\[\[@?(ftp://[^|\]]*)\|([^\]]*)\]\]', r'[\2](\1)', self.content)
-
-        # free naked external links
-        self.content = re.sub(r'\[\[@?(https?://[^|\]]*)\]\]', r'[\1](\1)', self.content)
-        self.content = re.sub(r'\[\[@?(ftp://[^|\]]*)\]\]', r'[\1](\1)', self.content)
-
-    def parse_file_links(self):
-        '''change file link format to external links.
-
-        file links with labels get the label.
-        file links without label get filename as label.
-        location of file is specified with cli argument.
-        '''
-        # change [[file:...]] links to external links
-        self.content = re.sub(r'\[\[file:([^|\]]*)\|([^\]]*)\]\]', r'[\2](' + self.options['filelocation'].replace('%s', r'\1') + r')', self.content)
-        self.content = re.sub(r'\[\[file:([^|\]]*)\]\]', r'[\1](' + self.options['filelocation'].replace('%s', r'\1') + r')', self.content)
-
-    def _link_filter(self, m):
+    def _link_filter(self, m, filelocationreplace = False):
         url = m.group(1)
         try:
             text = m.group(2)
@@ -230,9 +202,38 @@ class WikispacesToMarkdownConverter:
             returl = ret
             rettext = returl
 
-        #return "[{}]({})".format(rettext, returl.replace(' ', '-'))
+        if filelocationreplace == True:
+            returl = self.options['filelocation'].replace('%s', returl)
+
         return "[{}]({})".format(rettext, returl)
 
+    def parse_external_links(self):
+        '''change external link format, and free 'naked' external links.
+
+        external links with labels get single-braces instead of double
+        and space instead of pipe as delimiter between url and label
+
+        naked external links (those without label) simply get stripped of
+        braces, since that produces the equivalent output in markdown.
+        '''
+        # change external link format
+        self.content = re.sub(r'\[\[@?(https?://[^|\]]*)\|([^\]]*)\]\]', self._link_filter, self.content)
+        self.content = re.sub(r'\[\[@?(ftp://[^|\]]*)\|([^\]]*)\]\]', self._link_filter, self.content)
+
+        # free naked external links
+        self.content = re.sub(r'\[\[@?(https?://[^|\]]*)\]\]', self._link_filter, self.content)
+        self.content = re.sub(r'\[\[@?(ftp://[^|\]]*)\]\]', self._link_filter, self.content)
+
+    def parse_file_links(self):
+        '''change file link format to external links.
+
+        file links with labels get the label.
+        file links without label get filename as label.
+        location of file is specified with cli argument.
+        '''
+        # change [[file:...]] links to external links
+        self.content = re.sub(r'\[\[file:([^|\]]*)\|([^\]]*)\]\]', (lambda m: self._link_filter(m, filelocationreplace = True)), self.content)
+        self.content = re.sub(r'\[\[file:([^|\]]*)\]\]', (lambda m: self._link_filter(m, filelocationreplace = True)), self.content)
 
     def parse_links(self):
         # change [[...]] and [[...|...]] links
