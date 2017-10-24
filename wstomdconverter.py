@@ -95,7 +95,7 @@ class WikispacesToMarkdownConverter:
             if callable(self.options['link_filter']):
                 self.link_filter = self.options['link_filter']
         except KeyError:
-            self.link_filter = (lambda m,n: (m, n))
+            self.link_filter = (lambda url,text,linktype: (url, text))
 
         self.extended_start = False
         self.extended_end = False
@@ -188,24 +188,39 @@ class WikispacesToMarkdownConverter:
         """change italics from // to * """
         self.content = re.sub(r'(?<!http:)(?<!https:)(?<!ftp:)//', r"*", self.content)
 
-    def _link_filter(self, m, filelocationreplace = False):
-        url = m.group(1)
+    def _link_filter(self, m, linktype = 'page', grouporder = (1,2)):
+        linktypes = ['page', 'external', 'file', 'image', 'imagelink']
+        if not linktype in linktypes:
+            raise ValueError("linktype '{}' not one of [{}]".format(linktype, ', '.join(linktypes)))
+        url = m.group(grouporder[0])
         try:
-            text = m.group(2)
+            text = m.group(grouporder[1])
         except IndexError:
             text = url
 
-        ret = self.link_filter(url, text)
+        ret = self.link_filter(url, text, linktype)
         try:
             returl, rettext = ret
         except ValueError:
             returl = ret
             rettext = returl
 
-        if filelocationreplace == True:
+        if linktype == 'file':
             returl = self.options['filelocation'].replace('%s', returl)
 
+        if linktype == 'image':
+            returl = self.options['imagelocation'].replace('%s', returl)
+
         return "[{}]({})".format(rettext, returl)
+
+    def _link_filter_page(self, m):
+        return self._link_filter(m, linktype='page', grouporder=(1,2))
+
+    def _link_filter_external(self, m):
+        return self._link_filter(m, linktype='external', grouporder=(1,2))
+
+    def _link_filter_file(self, m):
+        return self._link_filter(m, linktype='file', grouporder=(1,2))
 
     def parse_external_links(self):
         '''change external link format, and free 'naked' external links.
@@ -217,12 +232,12 @@ class WikispacesToMarkdownConverter:
         braces, since that produces the equivalent output in markdown.
         '''
         # change external link format
-        self.content = re.sub(r'\[\[@?(https?://[^|\]]*)\|([^\]]*)\]\]', self._link_filter, self.content)
-        self.content = re.sub(r'\[\[@?(ftp://[^|\]]*)\|([^\]]*)\]\]', self._link_filter, self.content)
+        self.content = re.sub(r'\[\[@?(https?://[^|\]]*)\|([^\]]*)\]\]', self._link_filter_external, self.content)
+        self.content = re.sub(r'\[\[@?(ftp://[^|\]]*)\|([^\]]*)\]\]', self._link_filter_external, self.content)
 
         # free naked external links
-        self.content = re.sub(r'\[\[@?(https?://[^|\]]*)\]\]', self._link_filter, self.content)
-        self.content = re.sub(r'\[\[@?(ftp://[^|\]]*)\]\]', self._link_filter, self.content)
+        self.content = re.sub(r'\[\[@?(https?://[^|\]]*)\]\]', self._link_filter_external, self.content)
+        self.content = re.sub(r'\[\[@?(ftp://[^|\]]*)\]\]', self._link_filter_external, self.content)
 
     def parse_file_links(self):
         '''change file link format to external links.
@@ -232,8 +247,8 @@ class WikispacesToMarkdownConverter:
         location of file is specified with cli argument.
         '''
         # change [[file:...]] links to external links
-        self.content = re.sub(r'\[\[file:([^|\]]*)\|([^\]]*)\]\]', (lambda m: self._link_filter(m, filelocationreplace = True)), self.content)
-        self.content = re.sub(r'\[\[file:([^|\]]*)\]\]', (lambda m: self._link_filter(m, filelocationreplace = True)), self.content)
+        self.content = re.sub(r'\[\[file:([^|\]]*)\|([^\]]*)\]\]', self._link_filter_file, self.content)
+        self.content = re.sub(r'\[\[file:([^|\]]*)\]\]', self._link_filter_file, self.content)
 
     def parse_links(self):
         # change [[...]] and [[...|...]] links
@@ -241,8 +256,8 @@ class WikispacesToMarkdownConverter:
         #self.content = re.sub(r'\[\[([^|\]]*)\|([^\]]*)\]\]', r'[\2](\1)', self.content)
         #self.content = re.sub(r'\[\[([^|\]]*)\]\]', r'[\1](\1)', self.content)
         # TODO: Check if this working not just for gollum, but also for gh-pages jekyll
-        self.content = re.sub(r'\[\[([^|\]]*)\|([^\]]*)\]\]', self._link_filter, self.content)
-        self.content = re.sub(r'\[\[([^|\]]*)\]\]', self._link_filter, self.content)
+        self.content = re.sub(r'\[\[([^|\]]*)\|([^\]]*)\]\]', self._link_filter_page, self.content)
+        self.content = re.sub(r'\[\[([^|\]]*)\]\]', self._link_filter_page, self.content)
 
     def parse_underline(self):
         """change underline from __ to _ """
@@ -335,10 +350,14 @@ class WikispacesToMarkdownConverter:
             except AttributeError:
                 image_link = ''
 
+            image_filename, image_comment = self.link_filter(image_filename, image_comment, 'image')
+            if (image_filename[:7] != 'http://') and (image_filename[:8] != 'https://'):
+                image_filename = self.options['imagelocation'].replace('%s', image_filename)
+
             if image_link == '':
-                return '![%s](%s)' % (image_comment, self.options['imagelocation'].replace('%s', image_filename))
+                return '![%s](%s)' % (image_comment, image_filename)
             else:
-                return '![%s](%s)(%s)' % (image_comment, self.options['imagelocation'].replace('%s', image_filename), image_link)
+                return '![%s](%s)(%s)' % (image_comment, image_filename, image_link)
 
         self.content = re.sub(r'\[\[image:[^\]]+\]\]', image_parse, self.content)
 
